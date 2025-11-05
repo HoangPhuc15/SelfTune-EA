@@ -13,6 +13,7 @@
 #include <Trade/DealInfo.mqh>
 #include <Trade/PositionInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
+#include <Trade/HistoryDealInfo.mqh>
 
 const int     MAX_VOLUME_BUFFER = 512;
 
@@ -265,8 +266,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 
      if(entry_type==DEAL_ENTRY_OUT)
       {
-       long position_type = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_TYPE);
-       bool closing_buy = (position_type==POSITION_TYPE_BUY);
+       bool closing_buy = (deal_type==DEAL_TYPE_SELL);
        string direction = closing_buy ? "CLOSE_BUY" : "CLOSE_SELL";
       if(profit>=0)
          g_stats.window_wins++;
@@ -638,17 +638,13 @@ void ManageGrid(const double atr_points)
       return;
      }
 
-   double min_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double max_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double lot_step  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   long   volume_digits = SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS);
-   int    vol_digits = 2;
-   if(volume_digits>0)
-     {
-      vol_digits = (int)volume_digits;
-      if(vol_digits<0)
-         vol_digits = 2;
-     }
+    double min_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double max_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lot_step  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    long   volume_digits = 0;
+    int    vol_digits = 2;
+    if(SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS, volume_digits))
+       vol_digits = (int)MathMax(0, volume_digits);
 
    if(pos_type==POSITION_TYPE_BUY)
      {
@@ -684,11 +680,12 @@ void ManageGrid(const double atr_points)
 //+------------------------------------------------------------------+
 void ResetGridStateIfNeeded()
   {
-   double buy_volume=0.0, sell_volume=0.0;
-   for(int i=0;i<PositionsTotal();i++)
-     {
-      if(!PositionSelectByIndex(i))
-         continue;
+    double buy_volume=0.0, sell_volume=0.0;
+    int total_positions = PositionsTotal();
+    for(int idx=0; idx<total_positions; idx++)
+      {
+       if(!PositionSelectByIndex(idx))
+          continue;
       if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
          continue;
       ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
