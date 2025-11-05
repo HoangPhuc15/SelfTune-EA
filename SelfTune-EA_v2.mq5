@@ -231,78 +231,6 @@ void        RecordTradePattern(const ENUM_POSITION_TYPE direction,const int patt
                                const double profit);
 
 
-//--- global variables -------------------------------------------------------
-SIndicatorParams g_params;
-SRiskState       g_risk;
-STradeStats      g_stats;
-SGridState       g_grid = {0,0,0.0,0.0,0.0,0.0};
-SPatternStats    g_patternStats[2][PATTERN_COMBINATIONS];
-SPatternModel    g_patternModel[2][PATTERN_COMBINATIONS];
-SActiveTradeContext g_activeTrades[];
-SPatternCandidate   g_pendingPatterns[];
-SSignalDecision     g_buyDecision;
-SSignalDecision     g_sellDecision;
-
-int g_fastMAHandle = INVALID_HANDLE;
-int g_slowMAHandle = INVALID_HANDLE;
-int g_rsiHandle    = INVALID_HANDLE;
-int g_mfiHandle    = INVALID_HANDLE;
-int g_volHandle    = INVALID_HANDLE;
-int g_atrHandle    = INVALID_HANDLE;
-
-double g_fastMABuffer[];
-double g_slowMABuffer[];
-double g_rsiBuffer[];
-double g_mfiBuffer[];
-double g_volBuffer[];
-double g_atrBuffer[];
-
-datetime g_lastBarTime = 0;
-
-string g_logFileName        = "SelfTuneEA_log.csv";
-string g_stateFileName      = "SelfTuneEA_state.csv";
-string g_learningFileName   = "SelfTuneEA_learning.csv";
-
-//--- forward declarations ---------------------------------------------------
-void        InitializeParameters();
-bool        CreateIndicatorHandles();
-void        ReleaseIndicatorHandles();
-bool        RefreshIndicators();
-bool        IsNewBar();
-void        EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points);
-void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points);
-double      CalculateLotSize(const double stop_loss_points);
-bool        RiskChecks();
-void        ManagePositions(const double atr_points);
-void        ManageGrid(const double atr_points);
-void        ResetGridStateIfNeeded();
-void        LogEvent(const string message);
-void        LogIndicatorSnapshot();
-void        LogTrade(const ulong deal_ticket, const double deal_profit, const string direction);
-void        LoadState();
-void        SaveState();
-void        ResetWindowStats();
-void        SelfTuneParameters();
-void        RecreateIndicators();
-void        LoadLearningData();
-void        SaveLearningData();
-void        UpdateProbabilityModel();
-void        UpdateProbabilityModel(const int dir_index, const int pattern_index);
-int         PatternIndexFromConditions(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol);
-void        EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol,
-                                       const ENUM_POSITION_TYPE direction,int &pattern_index,double &probability,
-                                       double &avg_profit,double &avg_loss);
-bool        PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,double &adjusted_lot);
-double      AdaptiveGridSpacing(const double atr_points);
-void        PushPendingPattern(const SPatternCandidate &candidate);
-bool        PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate &candidate);
-void        RegisterActiveTrade(const ulong position_id,const int pattern_index,const ENUM_POSITION_TYPE direction,
-                                const double probability);
-bool        ExtractActiveTrade(const ulong position_id,int &pattern_index,ENUM_POSITION_TYPE &direction,double &probability);
-void        RemoveActiveTradeByIndex(const int index);
-void        RecordTradePattern(const ENUM_POSITION_TYPE direction,const int pattern_index,const double probability,
-                               const double profit);
-
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -349,6 +277,7 @@ int OnInit()
    LogEvent("EA initialized");
    return(INIT_SUCCEEDED);
   }
+ 
 //+------------------------------------------------------------------+
 //| Expert deinitialization function                                 |
 //+------------------------------------------------------------------+
@@ -1179,30 +1108,30 @@ void RecordTradePattern(const ENUM_POSITION_TYPE direction,const int pattern_ind
    if(pattern_index<0 || pattern_index>=PATTERN_COMBINATIONS)
       return;
    int dir_index = (direction==POSITION_TYPE_SELL ? 1 : 0);
-   SPatternStats &stats = g_patternStats[dir_index][pattern_index];
-   stats.trades++;
-   stats.sum_profit += profit;
+   SPatternStats *stats = &g_patternStats[dir_index][pattern_index];
+   stats->trades++;
+   stats->sum_profit += profit;
    if(profit>=0.0)
      {
-      stats.wins++;
-      stats.sum_win_profit += profit;
+      stats->wins++;
+      stats->sum_win_profit += profit;
      }
    else
      {
-      stats.sum_loss_profit += profit;
+      stats->sum_loss_profit += profit;
      }
 
-  UpdateProbabilityModel(dir_index, pattern_index);
+   UpdateProbabilityModel(dir_index, pattern_index);
 
-  SaveLearningData();
+   SaveLearningData();
 
-  if(InpVerboseLogging)
+   if(InpVerboseLogging)
      {
-      double win_rate = (stats.trades>0) ? (double)stats.wins/(double)stats.trades : 0.0;
-      double avg_win = (stats.wins>0) ? stats.sum_win_profit/(double)stats.wins : 0.0;
-      double avg_loss = ((stats.trades-stats.wins)>0) ? stats.sum_loss_profit/(double)(stats.trades-stats.wins) : 0.0;
+      double win_rate = (stats->trades>0) ? (double)stats->wins/(double)stats->trades : 0.0;
+      double avg_win = (stats->wins>0) ? stats->sum_win_profit/(double)stats->wins : 0.0;
+      double avg_loss = ((stats->trades-stats->wins)>0) ? stats->sum_loss_profit/(double)(stats->trades-stats->wins) : 0.0;
       LogEvent(StringFormat("Pattern %d dir %d updated: trades=%d winRate=%.2f avgWin=%.2f avgLoss=%.2f probUsed=%.2f",
-                            pattern_index, dir_index, stats.trades, win_rate, avg_win, avg_loss, probability));
+                            pattern_index, dir_index, stats->trades, win_rate, avg_win, avg_loss, probability));
      }
   }
 //+------------------------------------------------------------------+
@@ -1217,19 +1146,19 @@ void UpdateProbabilityModel()
 //+------------------------------------------------------------------+
 void UpdateProbabilityModel(const int dir_index, const int pattern_index)
   {
-   const SPatternStats &stats = g_patternStats[dir_index][pattern_index];
-   SPatternModel &model = g_patternModel[dir_index][pattern_index];
-   if(stats.trades==0)
+   const SPatternStats *stats = &g_patternStats[dir_index][pattern_index];
+   SPatternModel *model = &g_patternModel[dir_index][pattern_index];
+   if(stats->trades==0)
      {
-      model.probability = 0.0;
-      model.average_win = 0.0;
-      model.average_loss = 0.0;
+      model->probability = 0.0;
+      model->average_win = 0.0;
+      model->average_loss = 0.0;
       return;
      }
-   ulong losses = stats.trades - stats.wins;
-   model.probability = (double)stats.wins / (double)stats.trades;
-   model.average_win = (stats.wins>0) ? stats.sum_win_profit / (double)stats.wins : 0.0;
-   model.average_loss = (losses>0) ? stats.sum_loss_profit / (double)losses : 0.0;
+   ulong losses = stats->trades - stats->wins;
+   model->probability = (double)stats->wins / (double)stats->trades;
+   model->average_win = (stats->wins>0) ? stats->sum_win_profit / (double)stats->wins : 0.0;
+   model->average_loss = (losses>0) ? stats->sum_loss_profit / (double)losses : 0.0;
   }
 
 //+------------------------------------------------------------------+
@@ -1422,8 +1351,8 @@ void SaveLearningData()
      {
       for(int pattern=0; pattern<PATTERN_COMBINATIONS; ++pattern)
         {
-         const SPatternStats &stats = g_patternStats[dir][pattern];
-         FileWrite(handle, dir, pattern, stats.trades, stats.wins, stats.sum_profit, stats.sum_win_profit, stats.sum_loss_profit);
+        const SPatternStats *stats = &g_patternStats[dir][pattern];
+        FileWrite(handle, dir, pattern, stats->trades, stats->wins, stats->sum_profit, stats->sum_win_profit, stats->sum_loss_profit);
         }
      }
    FileClose(handle);
