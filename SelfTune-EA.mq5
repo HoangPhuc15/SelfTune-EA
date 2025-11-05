@@ -252,9 +252,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 
    ENUM_DEAL_ENTRY entry_type = DEAL_ENTRY_IN;
    ENUM_DEAL_TYPE  deal_type  = DEAL_TYPE_BUY;
-   double profit              = trans.profit;
-   double deal_volume         = trans.volume;
-   double deal_price          = trans.price;
+   double profit              = 0.0;
+   double deal_volume         = (result.volume>0.0 ? result.volume : request.volume);
+   double deal_price          = (result.price>0.0 ? result.price : request.price);
 
    if(HistoryDealSelect(trans.deal))
      {
