@@ -155,6 +155,11 @@ struct SActiveTradeContext
    int                  grid_level;
    double               lot_size;
    int                  pattern_mask;
+   datetime             open_time;      // [v3.1] track trade start for duration metrics
+   double               equity_before;  // [v3.1] equity snapshot at entry
+   double               equity_peak;    // [v3.1] rolling peak equity during trade
+   double               equity_trough;  // [v3.1] rolling trough equity during trade
+   bool                 is_grid;        // [v3.1] flag grid originated trades
   };
 
 struct SPatternCandidate
@@ -172,6 +177,11 @@ struct SPatternCandidate
    int                confirmations;
    double             lot_size;
    int                pattern_mask;
+   datetime           open_time;      // [v3.1] capture order submission time
+   double             equity_before;  // [v3.1] equity when order sent
+   double             equity_peak;    // [v3.1] rolling equity peak seed
+   double             equity_trough;  // [v3.1] rolling equity trough seed
+   bool               is_grid;        // [v3.1] differentiate grid trades
   };
 
 struct SSignalDecision
@@ -211,6 +221,11 @@ struct SLearningRecord
    string    signal_type;
    int       result;
    int       pattern_index;
+   double    equity_before;  // [v3.1] equity snapshot before trade
+   double    equity_after;   // [v3.1] equity snapshot after trade
+   double    duration_sec;   // [v3.1] holding duration in seconds
+   double    drawdown_pct;   // [v3.1] drawdown experienced during trade
+   string    trade_type;     // [v3.1] classification for AI analysis
   };
 
 //--- global variables -------------------------------------------------------
@@ -228,8 +243,13 @@ SSignalDecision     g_buyDecision;
 SSignalDecision     g_sellDecision;
 SLearningRecord     g_learningRecords[];
 int                 g_learningCount = 0;
+int                 g_learningHead  = 0;        // [v3.1] circular buffer head index
+int                 g_sinceLastTune = 0;        // [v3.1] trades since last tuning cycle
+double              g_lastTuneWinRate = 0.0;    // [v3.1] snapshot win rate per tuning cycle
+bool                g_hasTuneBaseline = false;  // [v3.1] guard for deviation-trigger logic
 double              g_recentRSI[];
 double              g_recentVolume[];
+bool                g_initComplete = false;     // [v3.1] block tuning during initialization
 
 int g_fastMAHandle = INVALID_HANDLE;
 int g_slowMAHandle = INVALID_HANDLE;
@@ -295,6 +315,14 @@ void        RecalculateRecentMetrics();
 double      ComputeRSIDeviation();
 double      ComputeVolumeDeviation();
 double      RecentWinRate();
+void        StoreLearningRecord(const SLearningRecord &record,const bool persist);
+void        EnsureLearningCapacity();
+int         LearningBufferIndex(const int ordinal);
+bool        GetLearningRecord(const int ordinal,SLearningRecord &record);
+void        UpdateActiveTradeExtents();
+string      CsvQuote(const string value);
+string      CsvUnquote(const string value);
+double      RecentAverageProfit(const int window);
 
 
 //+------------------------------------------------------------------+
@@ -329,6 +357,7 @@ int OnInit()
    g_trade.SetExpertMagicNumber((uint)MathRand());
 
    LogEvent("EA initialized");
+   g_initComplete = true; // [v3.1] enable post-init learning cycles
    return(INIT_SUCCEEDED);
   }
  
@@ -350,6 +379,8 @@ void OnTick()
    bool trading_allowed = RiskChecks();
    double atr_points = (g_atrBuffer[0]>0.0 ? g_atrBuffer[0]/_Point : 0.0);
    bool buy_signal=false, sell_signal=false;
+
+   UpdateActiveTradeExtents(); // [v3.1] refresh equity peaks/troughs for open trades
 
    if(IsNewBar())
      {
@@ -521,9 +552,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
         }
      }
 
-   if(g_learningCount>=MIN_LEARNING_ACTIVATION)
-      SelfTuneParameters();
-
    ResetGridStateIfNeeded();
   }
 
@@ -569,7 +597,7 @@ void InitializeFiles()
          FileWrite(handle, "timestamp","event","message");
          FileClose(handle);
         }
-     }
+    }
 
    handle = FileOpen(g_stateFileName, FILE_READ|FILE_CSV|FILE_ANSI);
    bool need_state_header = (handle==INVALID_HANDLE || FileSize(handle)==0);
@@ -598,19 +626,21 @@ void InitializeFiles()
       handle = FileOpen(g_learningFileName, FILE_WRITE|FILE_CSV|FILE_ANSI);
       if(handle!=INVALID_HANDLE)
         {
+         // [v3.1] expanded header with equity/duration analytics for AI ingestion
          FileWrite(handle,
                    "TradeID","Symbol","Time","FastMA","SlowMA","RSI","MFI","Volume",
-                   "Profit","WinLoss","GridLevel","ATR","SignalType","Result","PatternIndex");
+                   "Profit","WinLoss","GridLevel","ATR","SignalType","Result",
+                   "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex");
          FileClose(handle);
         }
-     }
+    }
   }
 //+------------------------------------------------------------------+
 //| Create indicator handles                                         |
 //+------------------------------------------------------------------+
 bool CreateIndicatorHandles()
   {
-   ReleaseIndicatorHandles();
+   ReleaseIndicatorHandles(); // [v3.1] guard against duplicate handles
 
    g_fastMAHandle = iMA(_Symbol, _Period, g_params.fast_period, 0, g_params.ma_method, g_params.ma_price);
   g_slowMAHandle = iMA(_Symbol, _Period, g_params.slow_period, 0, g_params.ma_method, g_params.ma_price);
@@ -863,6 +893,11 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.confirmations  = g_buyDecision.confirmed;
          candidate.lot_size       = buy_lot;
          candidate.pattern_mask   = g_buyDecision.pattern_mask;
+         candidate.open_time      = TimeCurrent();         // [v3.1] seed trade lifecycle metrics
+         candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY); // [v3.1] equity snapshot pre-trade
+         candidate.equity_peak    = candidate.equity_before;
+         candidate.equity_trough  = candidate.equity_before;
+         candidate.is_grid        = false;
          PushPendingPattern(candidate);
         }
      }
@@ -886,6 +921,11 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.confirmations  = g_sellDecision.confirmed;
          candidate.lot_size       = sell_lot;
          candidate.pattern_mask   = g_sellDecision.pattern_mask;
+         candidate.open_time      = TimeCurrent();         // [v3.1] seed trade lifecycle metrics
+         candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY);
+         candidate.equity_peak    = candidate.equity_before;
+         candidate.equity_trough  = candidate.equity_before;
+         candidate.is_grid        = false;
          PushPendingPattern(candidate);
         }
      }
@@ -1124,12 +1164,17 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-         if(g_trade.Buy(lot, _Symbol, current_ask, current_ask - sl_points*_Point, current_ask + tp_points*_Point, "Grid BUY"))
-           {
-            LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", g_grid.buy_levels+1, dynamic_step_points));
-            SPatternCandidate candidate = {POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.estimated_probability};
-            PushPendingPattern(candidate);
-           }
+            if(g_trade.Buy(lot, _Symbol, current_ask, current_ask - sl_points*_Point, current_ask + tp_points*_Point, "Grid BUY"))
+              {
+               LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", g_grid.buy_levels+1, dynamic_step_points));
+               SPatternCandidate candidate = {POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.estimated_probability};
+               candidate.open_time      = TimeCurrent();      // [v3.1] log timing for grid trades
+               candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY);
+               candidate.equity_peak    = candidate.equity_before;
+               candidate.equity_trough  = candidate.equity_before;
+               candidate.is_grid        = true;
+               PushPendingPattern(candidate);
+              }
         }
      }
    else if(pos_type==POSITION_TYPE_SELL)
@@ -1142,12 +1187,17 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-         if(g_trade.Sell(lot, _Symbol, current_bid, current_bid + sl_points*_Point, current_bid - tp_points*_Point, "Grid SELL"))
-           {
-            LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", g_grid.sell_levels+1, dynamic_step_points));
-            SPatternCandidate candidate = {POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.estimated_probability};
-            PushPendingPattern(candidate);
-           }
+            if(g_trade.Sell(lot, _Symbol, current_bid, current_bid + sl_points*_Point, current_bid - tp_points*_Point, "Grid SELL"))
+              {
+               LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", g_grid.sell_levels+1, dynamic_step_points));
+               SPatternCandidate candidate = {POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.estimated_probability};
+               candidate.open_time      = TimeCurrent();
+               candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY);
+               candidate.equity_peak    = candidate.equity_before;
+               candidate.equity_trough  = candidate.equity_before;
+               candidate.is_grid        = true;
+               PushPendingPattern(candidate);
+              }
         }
      }
   }
@@ -1325,6 +1375,11 @@ void RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candid
    g_activeTrades[size].grid_level   = candidate.grid_level;
    g_activeTrades[size].lot_size     = candidate.lot_size;
    g_activeTrades[size].pattern_mask = candidate.pattern_mask;
+   g_activeTrades[size].open_time    = (candidate.open_time>0 ? candidate.open_time : TimeCurrent());         // [v3.1]
+   g_activeTrades[size].equity_before= (candidate.equity_before>0.0 ? candidate.equity_before : AccountInfoDouble(ACCOUNT_EQUITY));
+   g_activeTrades[size].equity_peak  = (candidate.equity_peak>0.0 ? candidate.equity_peak : g_activeTrades[size].equity_before);
+   g_activeTrades[size].equity_trough= (candidate.equity_trough>0.0 ? candidate.equity_trough : g_activeTrades[size].equity_before);
+   g_activeTrades[size].is_grid      = candidate.is_grid;
   }
 //+------------------------------------------------------------------+
 bool ExtractActiveTrade(const ulong position_id,SActiveTradeContext &context)
@@ -1373,6 +1428,21 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
    record.signal_type   = (context.direction==POSITION_TYPE_SELL ? "Sell" : "Buy");
    record.result        = (profit>=0.0 ? 1 : 0);
    record.pattern_index = context.pattern_index;
+   record.equity_before = context.equity_before; // [v3.1] persist entry equity snapshot
+
+   double equity_after  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double equity_peak   = MathMax(context.equity_peak, context.equity_before);
+   double equity_floor  = MathMin(context.equity_trough, context.equity_before);
+   if(equity_floor<=0.0)
+      equity_floor = context.equity_before;
+   double drawdown_pct  = 0.0;
+   if(equity_peak>0.0)
+      drawdown_pct = MathMax(0.0, (equity_peak - MathMin(equity_after, equity_floor)) / equity_peak * 100.0);
+
+   record.equity_after  = equity_after;               // [v3.1] capture exit equity
+   record.duration_sec  = (double)MathMax(0, (int)(deal_time - context.open_time)); // [v3.1]
+   record.drawdown_pct  = drawdown_pct;              // [v3.1] store peak-to-valley drawdown
+   record.trade_type    = (context.is_grid ? "Grid" : "Primary"); // [v3.1]
 
    AppendLearningRecord(record);
 
@@ -1388,16 +1458,53 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
 //+------------------------------------------------------------------+
 void AppendLearningRecord(const SLearningRecord &record)
   {
-   //--- append the new sample and enforce the rolling 700 trade window
-   ArrayResize(g_learningRecords, g_learningCount+1);
-   g_learningRecords[g_learningCount] = record;
-   g_learningCount++;
+   StoreLearningRecord(record, true); // [v3.1] funnel through FIFO storage routine
+  }
+//+------------------------------------------------------------------+
+void StoreLearningRecord(const SLearningRecord &record,const bool persist)
+  {
+   EnsureLearningCapacity();
+   int capacity = ArraySize(g_learningRecords);
+   if(capacity<=0)
+      return;
+
+   int insert_index = 0;
+   if(g_learningCount<MAX_LEARNING_RECORDS)
+     {
+      insert_index = (g_learningHead + g_learningCount) % capacity;
+      g_learningCount++;
+     }
+   else
+     {
+      g_learningHead = (g_learningHead + 1) % capacity; // [v3.1] discard oldest record (FIFO)
+      insert_index = (g_learningHead + g_learningCount - 1 + capacity) % capacity;
+     }
+
+   g_learningRecords[insert_index] = record;
 
    TrimLearningBuffer();
+
+   if(!persist)
+      return;
+
    RecalculateRecentMetrics();
    UpdateProbabilityModel();
    SaveLearningData();
    SaveState();
+
+   if(!g_initComplete)
+      return;
+
+   g_sinceLastTune++;
+   double win_rate = RecentWinRate();
+   bool deviation = (g_hasTuneBaseline && MathAbs(win_rate - g_lastTuneWinRate) > 0.05); // [v3.1] deviation trigger
+   if(g_learningCount>=MIN_LEARNING_ACTIVATION && (g_sinceLastTune>=100 || deviation))
+     {
+      SelfTuneParameters();
+      g_sinceLastTune = 0;
+      g_lastTuneWinRate = win_rate;
+      g_hasTuneBaseline = true;
+     }
   }
 //+------------------------------------------------------------------+
 void TrimLearningBuffer()
@@ -1405,12 +1512,48 @@ void TrimLearningBuffer()
    if(g_learningCount<=MAX_LEARNING_RECORDS)
       return;
 
-   //--- discard oldest samples so only the most recent 700 remain
-   int shift = g_learningCount - MAX_LEARNING_RECORDS;
-   for(int i=0;i<MAX_LEARNING_RECORDS;i++)
-      g_learningRecords[i] = g_learningRecords[i+shift];
+   int overflow = g_learningCount - MAX_LEARNING_RECORDS;
+   int capacity = MathMax(1, ArraySize(g_learningRecords));
+   g_learningHead = (g_learningHead + overflow) % capacity; // [v3.1] advance head for overflowed samples
    g_learningCount = MAX_LEARNING_RECORDS;
-   ArrayResize(g_learningRecords, g_learningCount);
+  }
+//+------------------------------------------------------------------+
+void EnsureLearningCapacity()
+  {
+   if(ArraySize(g_learningRecords)<MAX_LEARNING_RECORDS)
+      ArrayResize(g_learningRecords, MAX_LEARNING_RECORDS); // [v3.1] preallocate ring buffer storage
+  }
+//+------------------------------------------------------------------+
+int LearningBufferIndex(const int ordinal)
+  {
+   if(ordinal<0 || ordinal>=g_learningCount)
+      return(-1);
+   int capacity = ArraySize(g_learningRecords);
+   if(capacity<=0)
+      return(-1);
+   return((g_learningHead + ordinal) % capacity); // [v3.1] translate ordinal into ring index
+  }
+//+------------------------------------------------------------------+
+bool GetLearningRecord(const int ordinal,SLearningRecord &record)
+  {
+   int idx = LearningBufferIndex(ordinal);
+   if(idx<0)
+      return(false);
+   record = g_learningRecords[idx];
+   return(true);
+  }
+//+------------------------------------------------------------------+
+void UpdateActiveTradeExtents()
+  {
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   int total = ArraySize(g_activeTrades);
+   for(int i=0;i<total;i++)
+     {
+      if(equity>g_activeTrades[i].equity_peak)
+         g_activeTrades[i].equity_peak = equity;    // [v3.1] track rolling equity peak
+      if(g_activeTrades[i].equity_trough==0.0 || equity<g_activeTrades[i].equity_trough)
+         g_activeTrades[i].equity_trough = equity;  // [v3.1] capture trough for drawdown calc
+     }
   }
 //+------------------------------------------------------------------+
 void RecalculateRecentMetrics()
@@ -1433,10 +1576,13 @@ void RecalculateRecentMetrics()
       int start_index = g_learningCount - stat_window;
       if(start_index<0)
          start_index = 0;
-      for(int i=start_index;i<g_learningCount;i++)
+      for(int ordinal=start_index; ordinal<g_learningCount; ordinal++)
         {
-         g_stats.window_profit += g_learningRecords[i].profit;
-         if(g_learningRecords[i].result>0)
+         SLearningRecord sample; // [v3.1] pull samples through FIFO helper
+         if(!GetLearningRecord(ordinal, sample))
+            continue;
+         g_stats.window_profit += sample.profit;
+         if(sample.result>0)
             g_stats.window_wins++;
          else
             g_stats.window_losses++;
@@ -1448,9 +1594,18 @@ void RecalculateRecentMetrics()
    ArrayResize(g_recentVolume, sample_window);
    for(int i=0;i<sample_window;i++)
      {
-      int idx = g_learningCount - sample_window + i;
-      g_recentRSI[i] = g_learningRecords[idx].rsi;
-      g_recentVolume[i] = g_learningRecords[idx].volume;
+      int ordinal = g_learningCount - sample_window + i;
+      SLearningRecord sample;
+      if(GetLearningRecord(ordinal, sample))
+        {
+         g_recentRSI[i] = sample.rsi;
+         g_recentVolume[i] = sample.volume;
+        }
+      else
+        {
+         g_recentRSI[i] = 0.0;
+         g_recentVolume[i] = 0.0;
+        }
      }
   }
 //+------------------------------------------------------------------+
@@ -1489,6 +1644,29 @@ double RecentWinRate()
    return((double)g_stats.window_wins / (double)g_stats.window_trades);
   }
 //+------------------------------------------------------------------+
+double RecentAverageProfit(const int window)
+  {
+   if(window<=0 || g_learningCount<=0)
+      return(0.0);
+   int sample = MathMin(window, g_learningCount);
+   double total = 0.0;
+   int counted = 0;
+   int start = g_learningCount - sample;
+   if(start<0)
+      start = 0;
+   for(int ordinal=start; ordinal<g_learningCount; ordinal++)
+     {
+      SLearningRecord rec;
+      if(!GetLearningRecord(ordinal, rec))
+         continue;
+      total += rec.profit;
+      counted++;
+     }
+   if(counted<=0)
+      return(0.0);
+   return(total / (double)counted); // [v3.1] feed adaptive learning-rate logic
+  }
+//+------------------------------------------------------------------+
 void UpdateProbabilityModel()
   {
    for(int dir=0; dir<2; ++dir)
@@ -1503,12 +1681,14 @@ void UpdateProbabilityModel()
         }
      }
 
-   for(int i=0;i<g_learningCount;i++)
-     {
-      SLearningRecord record = g_learningRecords[i];
-      string signal_upper = record.signal_type;
-      StringToUpper(signal_upper);
-      int dir_index = 0;
+  for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+    {
+     SLearningRecord record; // [v3.1] iterate over FIFO-ordered cache
+     if(!GetLearningRecord(ordinal, record))
+        continue;
+     string signal_upper = record.signal_type;
+     StringToUpper(signal_upper);
+     int dir_index = 0;
       if(StringFind(signal_upper, "SELL")!=-1)
          dir_index = 1;
       int pattern = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, record.pattern_index));
@@ -1648,12 +1828,25 @@ void SelfTuneParameters()
    double win_rate      = RecentWinRate();
    double avg_profit    = (g_stats.window_trades>0) ? g_stats.window_profit / (double)g_stats.window_trades : 0.0;
 
+   double recent_avg_profit = RecentAverageProfit(RECENT_METRIC_WINDOW); // [v3.1] evaluate short-term PnL
+   if(recent_avg_profit<0.0)
+      learningRate = MathMin(1.0, learningRate * 1.5); // [v3.1] accelerate recovery during drawdown
+   else if(win_rate>0.65)
+      learningRate = MathMax(0.0, learningRate * 0.75); // [v3.1] temper adjustments when win rate is elevated
+
+   LogEvent(StringFormat("SelfTune cycle triggered: trades=%I64u, winRate=%.4f, learningRate=%.2f", // [v3.1]
+                         g_stats.total_trades,
+                         win_rate,
+                         learningRate));
+
    //--- accumulate indicator snapshots for winners and losers to bias thresholds
    double win_rsi_sum=0.0, loss_rsi_sum=0.0, win_mfi_sum=0.0, loss_mfi_sum=0.0;
    int win_count=0, loss_count=0;
-   for(int i=0;i<g_learningCount;i++)
+   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
      {
-      SLearningRecord rec = g_learningRecords[i];
+      SLearningRecord rec;
+      if(!GetLearningRecord(ordinal, rec))
+         continue;
       if(rec.result>0)
         {
          win_count++;
@@ -1724,19 +1917,25 @@ void SelfTuneParameters()
                                 g_params.mfi_oversold, g_params.mfi_overbought,
                                 g_params.volume_multiplier);
    LogEvent(report);
+   g_lastTuneWinRate = win_rate;      // [v3.1] refresh deviation baseline
+   g_hasTuneBaseline = true;
    SaveState();
    RecreateIndicators();
   }
 //+------------------------------------------------------------------+
 void RecreateIndicators()
   {
-   CreateIndicatorHandles();
+   ReleaseIndicatorHandles();    // [v3.1] release prior handles before recreation
+   CreateIndicatorHandles();     // [v3.1] rebuild indicator stack safely
   }
 //+------------------------------------------------------------------+
 void LoadLearningData()
   {
-   ArrayResize(g_learningRecords, 0);
+   ArrayResize(g_learningRecords, MAX_LEARNING_RECORDS); // [v3.1] preallocate ring storage before load
    g_learningCount = 0;
+   g_learningHead  = 0;
+   g_sinceLastTune = 0;        // [v3.1] reset tuning cadence while rebuilding cache
+   g_hasTuneBaseline = false;
 
    for(int dir=0; dir<2; ++dir)
      {
@@ -1758,19 +1957,44 @@ void LoadLearningData()
       return;
      }
 
-   //--- skip header row to align reads with structured columns
+   //--- parse header to determine column availability
+   string header_fields[];
    if(!FileIsEnding(handle))
      {
-      FileReadString(handle);
-      while(!FileIsLineEnding(handle) && !FileIsEnding(handle))
-         FileReadString(handle);
+      while(true)
+        {
+         string field = FileReadString(handle);
+         int count = ArraySize(header_fields);
+         ArrayResize(header_fields, count+1);
+         header_fields[count] = field;
+         if(FileIsLineEnding(handle) || FileIsEnding(handle))
+            break;
+        }
+     }
+
+   bool has_extended_columns = false;
+   for(int i=0;i<ArraySize(header_fields);i++)
+     {
+      if(StringCompare(header_fields[i], "EquityBefore")==0)
+        {
+         has_extended_columns = true;
+         break;
+        }
      }
 
    while(!FileIsEnding(handle))
      {
       SLearningRecord record;
-      record.trade_id     = (ulong)FileReadNumber(handle);
-      record.symbol       = FileReadString(handle);
+      string trade_id_field = FileReadString(handle);
+      if(StringLen(trade_id_field)==0)
+        {
+         if(FileIsEnding(handle))
+            break;
+         if(FileIsLineEnding(handle))
+            continue;
+        }
+      record.trade_id     = (ulong)StrToDouble(trade_id_field);
+      record.symbol       = CsvUnquote(FileReadString(handle));
       record.time         = (datetime)FileReadNumber(handle);
       record.fast_ma      = FileReadNumber(handle);
       record.slow_ma      = FileReadNumber(handle);
@@ -1778,17 +2002,32 @@ void LoadLearningData()
       record.mfi          = FileReadNumber(handle);
       record.volume       = FileReadNumber(handle);
       record.profit       = FileReadNumber(handle);
-      record.win_loss     = FileReadString(handle);
+      record.win_loss     = CsvUnquote(FileReadString(handle));
       record.grid_level   = (int)FileReadNumber(handle);
       record.atr_points   = FileReadNumber(handle);
-      record.signal_type  = FileReadString(handle);
+      record.signal_type  = CsvUnquote(FileReadString(handle));
       record.result       = (int)FileReadNumber(handle);
-      record.pattern_index= (int)FileReadNumber(handle);
 
-      ArrayResize(g_learningRecords, g_learningCount+1);
-      g_learningRecords[g_learningCount] = record;
-      g_learningCount++;
-      TrimLearningBuffer();
+      if(has_extended_columns)
+        {
+         record.equity_before = FileReadNumber(handle);
+         record.equity_after  = FileReadNumber(handle);
+         record.duration_sec  = FileReadNumber(handle);
+         record.drawdown_pct  = FileReadNumber(handle);
+         record.trade_type    = CsvUnquote(FileReadString(handle));
+         record.pattern_index = (int)FileReadNumber(handle);
+        }
+      else
+        {
+         record.equity_before = 0.0;
+         record.equity_after  = 0.0;
+         record.duration_sec  = 0.0;
+         record.drawdown_pct  = 0.0;
+         record.trade_type    = "Primary";
+         record.pattern_index = (int)FileReadNumber(handle);
+        }
+
+      StoreLearningRecord(record, false);
      }
 
    FileClose(handle);
@@ -1805,14 +2044,17 @@ void SaveLearningData()
 
    FileWrite(handle,
              "TradeID","Symbol","Time","FastMA","SlowMA","RSI","MFI","Volume",
-             "Profit","WinLoss","GridLevel","ATR","SignalType","Result","PatternIndex");
+             "Profit","WinLoss","GridLevel","ATR","SignalType","Result",
+             "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex");
 
-   for(int i=0;i<g_learningCount;i++)
+   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
      {
-      SLearningRecord record = g_learningRecords[i];
+      SLearningRecord record;
+      if(!GetLearningRecord(ordinal, record))
+         continue;
       FileWrite(handle,
                 record.trade_id,
-                record.symbol,
+                CsvQuote(record.symbol),
                 record.time,
                 record.fast_ma,
                 record.slow_ma,
@@ -1820,25 +2062,48 @@ void SaveLearningData()
                 record.mfi,
                 record.volume,
                 record.profit,
-                record.win_loss,
+                CsvQuote(record.win_loss),
                 record.grid_level,
                 record.atr_points,
-                record.signal_type,
+                CsvQuote(record.signal_type),
                 record.result,
+                record.equity_before,
+                record.equity_after,
+                record.duration_sec,
+                record.drawdown_pct,
+                CsvQuote(record.trade_type),
                 record.pattern_index);
      }
    FileClose(handle);
   }
 //+------------------------------------------------------------------+
+string CsvQuote(const string value)
+  {
+   string tmp = value;
+   StringReplace(tmp, "\"", "\"\"");
+   return("\""+tmp+"\""); // [v3.1] ensure AI-friendly quoting
+  }
+//+------------------------------------------------------------------+
+string CsvUnquote(const string value)
+  {
+   string tmp = value;
+   while(StringLen(tmp)>=2 && StringGetCharacter(tmp,0)=='"' && StringGetCharacter(tmp,StringLen(tmp)-1)=='"')
+      tmp = StringSubstr(tmp,1,StringLen(tmp)-2);
+   StringReplace(tmp, "\"\"", "\"");
+   return(tmp);
+  }
+//+------------------------------------------------------------------+
 void LogEvent(const string message)
   {
    datetime ts = TimeCurrent();
-   string line = StringFormat("%s,EVENT,%s", TimeToString(ts, TIME_DATE|TIME_SECONDS), message);
-  int handle = FileOpen(g_logFileName, FILE_WRITE|FILE_READ|FILE_ANSI);
+   int handle = FileOpen(g_logFileName, FILE_WRITE|FILE_READ|FILE_CSV|FILE_ANSI);
    if(handle==INVALID_HANDLE)
       return;
    FileSeek(handle, 0, SEEK_END);
-   FileWriteString(handle, line+"\n");
+   FileWrite(handle,
+             CsvQuote(TimeToString(ts, TIME_DATE|TIME_SECONDS)),
+             CsvQuote("EVENT"),
+             CsvQuote(message)); // [v3.1] keep log CSV AI-compatible
    FileClose(handle);
   }
 //+------------------------------------------------------------------+
@@ -1851,12 +2116,16 @@ void LogIndicatorSnapshot()
 //+------------------------------------------------------------------+
 void LogTrade(const ulong deal_ticket, const double deal_profit, const string direction)
   {
-   string line = StringFormat("%s,TRADE,%I64u,%s,%.2f", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), deal_ticket, direction, deal_profit);
-  int handle = FileOpen(g_logFileName, FILE_WRITE|FILE_READ|FILE_ANSI);
+   datetime ts = TimeCurrent();
+   string message = StringFormat("ticket=%I64u,direction=%s,profit=%.2f", deal_ticket, direction, deal_profit); // [v3.1] structured log payload
+   int handle = FileOpen(g_logFileName, FILE_WRITE|FILE_READ|FILE_CSV|FILE_ANSI);
    if(handle==INVALID_HANDLE)
       return;
    FileSeek(handle,0,SEEK_END);
-   FileWriteString(handle, line+"\n");
+   FileWrite(handle,
+             CsvQuote(TimeToString(ts, TIME_DATE|TIME_SECONDS)),
+             CsvQuote("TRADE"),
+             CsvQuote(message));
    FileClose(handle);
   }
 //+------------------------------------------------------------------+
