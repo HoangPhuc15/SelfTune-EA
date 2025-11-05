@@ -9,8 +9,8 @@
 #property strict
 
 #include <Trade\Trade.mqh>
-#include <Trade\SymbolInfo.mqh>
-#include <Trade\PositionInfo.mqh>
+
+const int     MAX_VOLUME_BUFFER = 512;
 
 //--- input parameters -------------------------------------------------------
 sinput string sep0="--- Trend Filters ---";
@@ -96,8 +96,6 @@ struct SGridState
 
 //--- global variables -------------------------------------------------------
 CTrade        g_trade;
-CSymbolInfo   g_symbol;
-CPositionInfo g_position;
 
 SIndicatorParams g_params;
 SRiskState       g_risk;
@@ -111,12 +109,12 @@ int g_mfiHandle    = INVALID_HANDLE;
 int g_volHandle    = INVALID_HANDLE;
 int g_atrHandle    = INVALID_HANDLE;
 
-double g_fastMABuffer[4];
-double g_slowMABuffer[4];
-double g_rsiBuffer[4];
-double g_mfiBuffer[4];
-double g_volBuffer[256];
-double g_atrBuffer[4];
+double g_fastMABuffer[];
+double g_slowMABuffer[];
+double g_rsiBuffer[];
+double g_mfiBuffer[];
+double g_volBuffer[];
+double g_atrBuffer[];
 
 datetime g_lastBarTime = 0;
 
@@ -150,9 +148,9 @@ void        RecreateIndicators();
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   if(!g_symbol.Name(_Symbol) || !g_symbol.Select(_Symbol))
+   if(!SymbolSelect(_Symbol,true))
      {
-      Print(__FUNCTION__,": failed to select symbol information");
+      Print(__FUNCTION__,": failed to select symbol");
       return(INIT_FAILED);
      }
 
@@ -236,6 +234,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    if(deal_ticket==0)
       return;
 
+   if(!HistoryDealSelect(deal_ticket))
+      return;
+
    long entry_type = HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
    long deal_type  = HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
    double profit   = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);
@@ -294,7 +295,7 @@ void InitializeParameters()
    g_params.mfi_period         = MathMax(3, InpMFIPeriod);
    g_params.mfi_oversold       = InpMFIOversold;
    g_params.mfi_overbought     = InpMFIOverbought;
-   g_params.volume_period      = MathMax(5, MathMin((int)ArraySize(g_volBuffer)-2, InpVolumePeriod));
+   g_params.volume_period      = MathMax(5, MathMin(MAX_VOLUME_BUFFER, InpVolumePeriod));
    g_params.volume_multiplier  = MathMax(0.5, InpVolumeMultiplier);
    g_params.ma_method          = InpMAType;
    g_params.ma_price           = InpMAPrice;
@@ -309,8 +310,8 @@ bool CreateIndicatorHandles()
    g_fastMAHandle = iMA(_Symbol, _Period, g_params.fast_period, 0, g_params.ma_method, g_params.ma_price);
    g_slowMAHandle = iMA(_Symbol, _Period, g_params.slow_period, 0, g_params.ma_method, g_params.ma_price);
    g_rsiHandle    = iRSI(_Symbol, _Period, g_params.rsi_period, g_params.ma_price);
-   g_mfiHandle    = iMFI(_Symbol, _Period, g_params.mfi_period);
-   g_volHandle    = iVolumes(_Symbol, _Period);
+   g_mfiHandle    = iMFI(_Symbol, _Period, g_params.mfi_period, VOLUME_TICK);
+   g_volHandle    = iVolumes(_Symbol, _Period, VOLUME_TICK);
    g_atrHandle    = iATR(_Symbol, _Period, InpATRPeriod);
 
    if(g_fastMAHandle==INVALID_HANDLE || g_slowMAHandle==INVALID_HANDLE ||
@@ -320,6 +321,14 @@ bool CreateIndicatorHandles()
       Print(__FUNCTION__,": handle creation failed, error=",GetLastError());
       return(false);
      }
+
+   ArrayResize(g_fastMABuffer,4);
+   ArrayResize(g_slowMABuffer,4);
+   ArrayResize(g_rsiBuffer,4);
+   ArrayResize(g_mfiBuffer,4);
+   ArrayResize(g_atrBuffer,4);
+   int volume_size = MathMax(g_params.volume_period,5);
+   ArrayResize(g_volBuffer,volume_size);
 
    ArraySetAsSeries(g_fastMABuffer,true);
    ArraySetAsSeries(g_slowMABuffer,true);
@@ -776,7 +785,7 @@ void LoadState()
    g_params.slow_period   = MathMax(g_params.fast_period+2, g_params.slow_period);
    g_params.rsi_period    = MathMax(3, g_params.rsi_period);
    g_params.mfi_period    = MathMax(3, g_params.mfi_period);
-   g_params.volume_period = MathMax(5, MathMin((int)ArraySize(g_volBuffer)-2, g_params.volume_period));
+   g_params.volume_period = MathMax(5, MathMin(MAX_VOLUME_BUFFER, g_params.volume_period));
    g_params.volume_multiplier = MathMax(0.5, MathMin(3.0, g_params.volume_multiplier));
    FileClose(handle);
   }
@@ -854,7 +863,7 @@ void SelfTuneParameters()
       g_params.volume_multiplier = MathMin(3.0, MathMax(0.5, g_params.volume_multiplier + (avg_profit>=0.0?-0.02:0.02)));
      }
 
-   g_params.volume_period = MathMax(5, MathMin((int)ArraySize(g_volBuffer)-2, g_params.volume_period + (avg_profit>=0.0?-1:1)));
+   g_params.volume_period = MathMax(5, MathMin(MAX_VOLUME_BUFFER, g_params.volume_period + (avg_profit>=0.0?-1:1)));
 
    if(g_params.rsi_overbought - g_params.rsi_oversold < 5.0)
      {
