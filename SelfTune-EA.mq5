@@ -14,6 +14,13 @@
 #include <Trade/PositionInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
 
+#ifndef DEAL_ENTRY_IN
+#define DEAL_ENTRY_IN  ((ENUM_DEAL_ENTRY)0)
+#endif
+#ifndef DEAL_ENTRY_OUT
+#define DEAL_ENTRY_OUT ((ENUM_DEAL_ENTRY)1)
+#endif
+
 const int     MAX_VOLUME_BUFFER = 512;
 
 //--- input parameters -------------------------------------------------------
