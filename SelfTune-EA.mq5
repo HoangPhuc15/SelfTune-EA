@@ -239,9 +239,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 
    ENUM_DEAL_ENTRY entry_type = trans.entry;
    ENUM_DEAL_TYPE  deal_type  = (ENUM_DEAL_TYPE)trans.deal_type;
-   double profit              = 0.0;
-   if(HistoryDealSelect(trans.deal))
-      profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+   double profit              = trans.profit;
 
    if(entry_type==DEAL_ENTRY_IN)
      {
@@ -690,7 +688,8 @@ void ResetGridStateIfNeeded()
   {
     double buy_volume=0.0, sell_volume=0.0;
     int total_positions = PositionsTotal();
-    for(int idx=0; idx<total_positions; idx++)
+    int idx;
+    for(idx=0; idx<total_positions; idx++)
       {
        if(!PositionSelectByIndex(idx))
           continue;
