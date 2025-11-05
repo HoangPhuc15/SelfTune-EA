@@ -20,6 +20,12 @@
 #ifndef DEAL_ENTRY_OUT
 #define DEAL_ENTRY_OUT ((ENUM_DEAL_ENTRY)1)
 #endif
+#ifndef DEAL_ENTRY_IN_BY
+#define DEAL_ENTRY_IN_BY ((ENUM_DEAL_ENTRY)2)
+#endif
+#ifndef DEAL_ENTRY_OUT_BY
+#define DEAL_ENTRY_OUT_BY ((ENUM_DEAL_ENTRY)3)
+#endif
 
 const int     MAX_VOLUME_BUFFER = 512;
 
@@ -244,32 +250,56 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    if(trans.type!=TRADE_TRANSACTION_DEAL_ADD && trans.type!=TRADE_TRANSACTION_DEAL_UPDATE)
       return;
 
-   ENUM_DEAL_ENTRY entry_type = trans.entry;
-   ENUM_DEAL_TYPE  deal_type  = (ENUM_DEAL_TYPE)trans.deal_type;
+   ENUM_DEAL_ENTRY entry_type = DEAL_ENTRY_IN;
+   ENUM_DEAL_TYPE  deal_type  = DEAL_TYPE_BUY;
    double profit              = trans.profit;
+   double deal_volume         = trans.volume;
+   double deal_price          = trans.price;
 
-   if(entry_type==DEAL_ENTRY_IN)
+   if(HistoryDealSelect(trans.deal))
+     {
+      long entry_raw = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+      entry_type = (ENUM_DEAL_ENTRY)entry_raw;
+
+      long type_raw = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+      deal_type = (ENUM_DEAL_TYPE)type_raw;
+
+      double hist_profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+      profit = hist_profit;
+
+      double hist_volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+      if(hist_volume>0.0)
+         deal_volume = hist_volume;
+
+      double hist_price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+      if(hist_price>0.0)
+         deal_price = hist_price;
+     }
+
+   bool entry_is_in  = (entry_type==DEAL_ENTRY_IN || entry_type==DEAL_ENTRY_IN_BY);
+   bool entry_is_out = (entry_type==DEAL_ENTRY_OUT || entry_type==DEAL_ENTRY_OUT_BY);
+
+   if(entry_is_in)
      {
       g_stats.total_trades++;
       g_stats.window_trades++;
-      double deal_volume = trans.volume;
       if(deal_type==DEAL_TYPE_BUY)
         {
          if(g_grid.buy_levels==0)
             g_grid.base_buy_lot = deal_volume;
          g_grid.buy_levels++;
-         g_grid.last_buy_price = trans.price;
+         g_grid.last_buy_price = deal_price;
         }
       else if(deal_type==DEAL_TYPE_SELL)
         {
          if(g_grid.sell_levels==0)
             g_grid.base_sell_lot = deal_volume;
          g_grid.sell_levels++;
-         g_grid.last_sell_price = trans.price;
+         g_grid.last_sell_price = deal_price;
         }
      }
 
-     if(entry_type==DEAL_ENTRY_OUT)
+   if(entry_is_out)
       {
        bool closing_buy = (deal_type==DEAL_TYPE_SELL);
        string direction = closing_buy ? "CLOSE_BUY" : "CLOSE_SELL";
@@ -693,13 +723,12 @@ void ManageGrid(const double atr_points)
 //+------------------------------------------------------------------+
 void ResetGridStateIfNeeded()
   {
-    double buy_volume=0.0, sell_volume=0.0;
-    int total_positions = PositionsTotal();
-    int idx;
-    for(idx=0; idx<total_positions; idx++)
-      {
-       if(!PositionSelectByIndex(idx))
-          continue;
+   double buy_volume=0.0, sell_volume=0.0;
+   int total_positions = PositionsTotal();
+   for(int i=0; i<total_positions; i++)
+     {
+      if(!PositionSelectByIndex(i))
+         continue;
       if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
          continue;
       ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
