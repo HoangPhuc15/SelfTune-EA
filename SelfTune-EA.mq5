@@ -13,7 +13,6 @@
 #include <Trade/DealInfo.mqh>
 #include <Trade/PositionInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
-#include <Trade/HistoryDealInfo.mqh>
 
 const int     MAX_VOLUME_BUFFER = 512;
 
@@ -232,35 +231,34 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
   {
-   ulong deal_ticket = trans.deal;
-   if(deal_ticket==0)
+   if(trans.deal==0 || trans.symbol!=_Symbol)
       return;
 
-   if(!HistoryDealSelect(deal_ticket))
+   if(trans.type!=TRADE_TRANSACTION_DEAL_ADD && trans.type!=TRADE_TRANSACTION_DEAL_UPDATE)
       return;
 
-   long entry_type = HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
-   long deal_type  = HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
-   double profit   = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);
+   ENUM_DEAL_ENTRY entry_type = (ENUM_DEAL_ENTRY)trans.deal_entry;
+   ENUM_DEAL_TYPE  deal_type  = (ENUM_DEAL_TYPE)trans.deal_type;
+   double profit              = trans.profit;
 
    if(entry_type==DEAL_ENTRY_IN)
      {
       g_stats.total_trades++;
       g_stats.window_trades++;
-      double deal_volume = HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
+      double deal_volume = trans.volume;
       if(deal_type==DEAL_TYPE_BUY)
         {
          if(g_grid.buy_levels==0)
             g_grid.base_buy_lot = deal_volume;
          g_grid.buy_levels++;
-         g_grid.last_buy_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+         g_grid.last_buy_price = trans.price;
         }
       else if(deal_type==DEAL_TYPE_SELL)
         {
          if(g_grid.sell_levels==0)
             g_grid.base_sell_lot = deal_volume;
          g_grid.sell_levels++;
-         g_grid.last_sell_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+         g_grid.last_sell_price = trans.price;
         }
      }
 
@@ -268,13 +266,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       {
        bool closing_buy = (deal_type==DEAL_TYPE_SELL);
        string direction = closing_buy ? "CLOSE_BUY" : "CLOSE_SELL";
-      if(profit>=0)
-         g_stats.window_wins++;
-      else
-         g_stats.window_losses++;
-      g_stats.total_profit += profit;
-      g_stats.window_profit += profit;
-      LogTrade(deal_ticket, profit, direction);
+       if(profit>=0)
+          g_stats.window_wins++;
+       else
+          g_stats.window_losses++;
+       g_stats.total_profit += profit;
+       g_stats.window_profit += profit;
+       LogTrade(trans.deal, profit, direction);
      }
 
    if(g_stats.window_trades>= (ulong)MathMax(1, InpTradesPerTune))
@@ -641,10 +639,18 @@ void ManageGrid(const double atr_points)
     double min_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double max_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
     double lot_step  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-    long   volume_digits = 0;
     int    vol_digits = 2;
-    if(SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS, volume_digits))
-       vol_digits = (int)MathMax(0, volume_digits);
+    if(lot_step>0.0)
+      {
+       double step = lot_step;
+       int digits = 0;
+       while(digits<8 && step<1.0)
+         {
+          step*=10.0;
+          digits++;
+         }
+       vol_digits = MathMax(0, digits);
+      }
 
    if(pos_type==POSITION_TYPE_BUY)
      {
@@ -682,7 +688,8 @@ void ResetGridStateIfNeeded()
   {
     double buy_volume=0.0, sell_volume=0.0;
     int total_positions = PositionsTotal();
-    for(int idx=0; idx<total_positions; idx++)
+    int idx=0;
+    for(idx=0; idx<total_positions; idx++)
       {
        if(!PositionSelectByIndex(idx))
           continue;
