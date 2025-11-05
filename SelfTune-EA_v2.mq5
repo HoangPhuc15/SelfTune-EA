@@ -27,8 +27,12 @@
 #endif
 
 const int     MAX_VOLUME_BUFFER = 512;
-const int     PATTERN_BIT_COUNT = 4;
-const int     PATTERN_COMBINATIONS = 1 << PATTERN_BIT_COUNT;
+
+enum ENUM_PATTERN_CONSTANTS
+  {
+   PATTERN_BIT_COUNT    = 4,
+   PATTERN_COMBINATIONS = 1 << PATTERN_BIT_COUNT
+  };
 
 //--- input parameters -------------------------------------------------------
 sinput string sep0="--- Trend Filters ---";
@@ -1013,17 +1017,17 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,d
       return(false);
      }
 
-  double scale = probability / InpProbabilityThreshold;
-  scale = MathMax(InpConfidenceFloor, MathMin(1.0, scale));
-  double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-  double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-  adjusted_lot = MathMax(base_lot * scale, min_lot);
-  if(lot_step>0.0)
-     adjusted_lot = MathFloor(adjusted_lot/lot_step)*lot_step;
-  adjusted_lot = MathMax(adjusted_lot, min_lot);
-  LogEvent(StringFormat("Lot adjusted by probability %.2f -> scale %.2f", probability, scale));
-  return(true);
- }
+   double scale = probability / InpProbabilityThreshold;
+   scale = MathMax(InpConfidenceFloor, MathMin(1.0, scale));
+   double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   adjusted_lot = MathMax(base_lot * scale, min_lot);
+   if(lot_step>0.0)
+      adjusted_lot = MathFloor(adjusted_lot/lot_step)*lot_step;
+   adjusted_lot = MathMax(adjusted_lot, min_lot);
+   LogEvent(StringFormat("Lot adjusted by probability %.2f -> scale %.2f", probability, scale));
+   return(true);
+  }
 //+------------------------------------------------------------------+
 double AdaptiveGridSpacing(const double atr_points)
   {
@@ -1108,17 +1112,16 @@ void RecordTradePattern(const ENUM_POSITION_TYPE direction,const int pattern_ind
    if(pattern_index<0 || pattern_index>=PATTERN_COMBINATIONS)
       return;
    int dir_index = (direction==POSITION_TYPE_SELL ? 1 : 0);
-   SPatternStats *stats = &g_patternStats[dir_index][pattern_index];
-   stats->trades++;
-   stats->sum_profit += profit;
+   g_patternStats[dir_index][pattern_index].trades++;
+   g_patternStats[dir_index][pattern_index].sum_profit += profit;
    if(profit>=0.0)
      {
-      stats->wins++;
-      stats->sum_win_profit += profit;
+      g_patternStats[dir_index][pattern_index].wins++;
+      g_patternStats[dir_index][pattern_index].sum_win_profit += profit;
      }
    else
      {
-      stats->sum_loss_profit += profit;
+      g_patternStats[dir_index][pattern_index].sum_loss_profit += profit;
      }
 
    UpdateProbabilityModel(dir_index, pattern_index);
@@ -1127,11 +1130,14 @@ void RecordTradePattern(const ENUM_POSITION_TYPE direction,const int pattern_ind
 
    if(InpVerboseLogging)
      {
-      double win_rate = (stats->trades>0) ? (double)stats->wins/(double)stats->trades : 0.0;
-      double avg_win = (stats->wins>0) ? stats->sum_win_profit/(double)stats->wins : 0.0;
-      double avg_loss = ((stats->trades-stats->wins)>0) ? stats->sum_loss_profit/(double)(stats->trades-stats->wins) : 0.0;
+      ulong total_trades = g_patternStats[dir_index][pattern_index].trades;
+      ulong win_trades   = g_patternStats[dir_index][pattern_index].wins;
+      ulong loss_trades  = total_trades - win_trades;
+      double win_rate = (total_trades>0) ? (double)win_trades/(double)total_trades : 0.0;
+      double avg_win = (win_trades>0) ? g_patternStats[dir_index][pattern_index].sum_win_profit/(double)win_trades : 0.0;
+      double avg_loss = (loss_trades>0) ? g_patternStats[dir_index][pattern_index].sum_loss_profit/(double)loss_trades : 0.0;
       LogEvent(StringFormat("Pattern %d dir %d updated: trades=%d winRate=%.2f avgWin=%.2f avgLoss=%.2f probUsed=%.2f",
-                            pattern_index, dir_index, stats->trades, win_rate, avg_win, avg_loss, probability));
+                            pattern_index, dir_index, (int)total_trades, win_rate, avg_win, avg_loss, probability));
      }
   }
 //+------------------------------------------------------------------+
@@ -1146,19 +1152,19 @@ void UpdateProbabilityModel()
 //+------------------------------------------------------------------+
 void UpdateProbabilityModel(const int dir_index, const int pattern_index)
   {
-   const SPatternStats *stats = &g_patternStats[dir_index][pattern_index];
-   SPatternModel *model = &g_patternModel[dir_index][pattern_index];
-   if(stats->trades==0)
+   if(g_patternStats[dir_index][pattern_index].trades==0)
      {
-      model->probability = 0.0;
-      model->average_win = 0.0;
-      model->average_loss = 0.0;
+      g_patternModel[dir_index][pattern_index].probability = 0.0;
+      g_patternModel[dir_index][pattern_index].average_win = 0.0;
+      g_patternModel[dir_index][pattern_index].average_loss = 0.0;
       return;
      }
-   ulong losses = stats->trades - stats->wins;
-   model->probability = (double)stats->wins / (double)stats->trades;
-   model->average_win = (stats->wins>0) ? stats->sum_win_profit / (double)stats->wins : 0.0;
-   model->average_loss = (losses>0) ? stats->sum_loss_profit / (double)losses : 0.0;
+   ulong pattern_trades = g_patternStats[dir_index][pattern_index].trades;
+   ulong pattern_wins   = g_patternStats[dir_index][pattern_index].wins;
+   ulong losses = pattern_trades - pattern_wins;
+   g_patternModel[dir_index][pattern_index].probability = (double)pattern_wins / (double)pattern_trades;
+   g_patternModel[dir_index][pattern_index].average_win = (pattern_wins>0) ? g_patternStats[dir_index][pattern_index].sum_win_profit / (double)pattern_wins : 0.0;
+   g_patternModel[dir_index][pattern_index].average_loss = (losses>0) ? g_patternStats[dir_index][pattern_index].sum_loss_profit / (double)losses : 0.0;
   }
 
 //+------------------------------------------------------------------+
@@ -1351,8 +1357,14 @@ void SaveLearningData()
      {
       for(int pattern=0; pattern<PATTERN_COMBINATIONS; ++pattern)
         {
-        const SPatternStats *stats = &g_patternStats[dir][pattern];
-        FileWrite(handle, dir, pattern, stats->trades, stats->wins, stats->sum_profit, stats->sum_win_profit, stats->sum_loss_profit);
+        FileWrite(handle,
+                  dir,
+                  pattern,
+                  g_patternStats[dir][pattern].trades,
+                  g_patternStats[dir][pattern].wins,
+                  g_patternStats[dir][pattern].sum_profit,
+                  g_patternStats[dir][pattern].sum_win_profit,
+                  g_patternStats[dir][pattern].sum_loss_profit);
         }
      }
    FileClose(handle);
