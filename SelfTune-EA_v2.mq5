@@ -51,6 +51,7 @@ input double            InpVolumeMultiplier= 1.20;           // Volume multiplie
 
 sinput string sep1="--- Risk Management ---";
 input double            InpRiskPerTrade    = 1.0;            // Risk per trade (% of equity)
+input double            InpInitialLot      = 0.0;            // Optional fixed baseline lot (0 = risk based)
 input double            InpMaxDrawdown     = 20.0;           // Max equity drawdown before halt (%)
 input double            InpDailyLoss       = 5.0;            // Max daily loss before halt (%)
 input double            InpATRMultiplierSL = 3.0;            // ATR multiplier for stop loss
@@ -618,13 +619,16 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
 
    double fast_ma_now = g_fastMABuffer[0];
    double slow_ma_now = g_slowMABuffer[0];
-   double fast_ma_prev= g_fastMABuffer[1];
-   double slow_ma_prev= g_slowMABuffer[1];
+   double fast_ma_prev= (ArraySize(g_fastMABuffer)>1 ? g_fastMABuffer[1] : fast_ma_now);
+   double slow_ma_prev= (ArraySize(g_slowMABuffer)>1 ? g_slowMABuffer[1] : slow_ma_now);
 
-   double rsi_now = g_rsiBuffer[0];
-   double mfi_now = g_mfiBuffer[0];
+   double rsi_now  = g_rsiBuffer[0];
+   double rsi_prev = (ArraySize(g_rsiBuffer)>1 ? g_rsiBuffer[1] : rsi_now);
+   double mfi_now  = g_mfiBuffer[0];
+   double mfi_prev = (ArraySize(g_mfiBuffer)>1 ? g_mfiBuffer[1] : mfi_now);
 
-   double volume_now = g_volBuffer[0];
+   double volume_now  = g_volBuffer[0];
+   double volume_prev = (ArraySize(g_volBuffer)>1 ? g_volBuffer[1] : volume_now);
    double volume_avg = 0.0;
    int count = MathMin(g_params.volume_period,ArraySize(g_volBuffer));
    for(int i=0;i<count;i++)
@@ -632,21 +636,29 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
    if(count>0)
       volume_avg /= count;
 
-   bool ma_bullish = (fast_ma_now>slow_ma_now) && (fast_ma_prev<=slow_ma_prev);
-   bool ma_bearish = (fast_ma_now<slow_ma_now) && (fast_ma_prev>=slow_ma_prev);
+   bool ma_bullish = (fast_ma_now>slow_ma_now) || (fast_ma_now>=slow_ma_now && fast_ma_prev>slow_ma_prev);
+   bool ma_bearish = (fast_ma_now<slow_ma_now) || (fast_ma_now<=slow_ma_now && fast_ma_prev<slow_ma_prev);
 
-   bool rsi_oversold = (rsi_now<=g_params.rsi_oversold);
-   bool rsi_overbought = (rsi_now>=g_params.rsi_overbought);
+   bool rsi_rising = (rsi_now>rsi_prev);
+   bool mfi_rising = (mfi_now>mfi_prev);
 
-   bool mfi_oversold = (mfi_now<=g_params.mfi_oversold);
-   bool mfi_overbought = (mfi_now>=g_params.mfi_overbought);
+   bool rsi_bullish = (rsi_now<=g_params.rsi_oversold) || (rsi_rising && rsi_now<g_params.rsi_overbought);
+   bool rsi_bearish = (rsi_now>=g_params.rsi_overbought) || (!rsi_rising && rsi_now>g_params.rsi_oversold);
 
-   bool volume_confirm = (volume_avg>0 && volume_now >= volume_avg*g_params.volume_multiplier);
+   bool mfi_bullish = (mfi_now<=g_params.mfi_oversold) || (mfi_rising && mfi_now<g_params.mfi_overbought);
+   bool mfi_bearish = (mfi_now>=g_params.mfi_overbought) || (!mfi_rising && mfi_now>g_params.mfi_oversold);
+
+   bool volume_confirm = false;
+   if(volume_avg>0.0)
+      volume_confirm = (volume_now >= volume_avg * g_params.volume_multiplier) ||
+                       ((volume_now>volume_avg) && (volume_now>=volume_prev));
+   else
+      volume_confirm = (volume_now>=volume_prev && volume_now>0.0);
 
    ArrayInitialize(g_buyDecision.conditions,false);
    g_buyDecision.conditions[0] = ma_bullish;
-   g_buyDecision.conditions[1] = rsi_oversold;
-   g_buyDecision.conditions[2] = mfi_oversold;
+   g_buyDecision.conditions[1] = rsi_bullish;
+   g_buyDecision.conditions[2] = mfi_bullish;
    g_buyDecision.conditions[3] = volume_confirm;
    g_buyDecision.confirmed = 0;
    for(int bi=0; bi<PATTERN_BIT_COUNT; ++bi)
@@ -661,8 +673,8 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
 
    ArrayInitialize(g_sellDecision.conditions,false);
    g_sellDecision.conditions[0] = ma_bearish;
-   g_sellDecision.conditions[1] = rsi_overbought;
-   g_sellDecision.conditions[2] = mfi_overbought;
+   g_sellDecision.conditions[1] = rsi_bearish;
+   g_sellDecision.conditions[2] = mfi_bearish;
    g_sellDecision.conditions[3] = volume_confirm;
    g_sellDecision.confirmed = 0;
    for(int si=0; si<PATTERN_BIT_COUNT; ++si)
@@ -740,26 +752,78 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
 //+------------------------------------------------------------------+
 double CalculateLotSize(const double stop_loss_points)
   {
-   if(stop_loss_points<=0.0)
-      return(0.0);
-
-   double equity      = AccountInfoDouble(ACCOUNT_EQUITY);
-   double risk_amount = equity * InpRiskPerTrade / 100.0;
-
-   double tick_value  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tick_size   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double lot_step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double max_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   int    volume_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS);
 
-   if(tick_value<=0 || tick_size<=0 || lot_step<=0)
-      return(min_lot);
+   if(min_lot<=0.0)
+     {
+      if(lot_step>0.0)
+         min_lot = lot_step;
+      else
+         min_lot = 0.01;
+     }
+   if(max_lot<=0.0)
+      max_lot = min_lot * 100.0;
+   if(volume_digits<0)
+      volume_digits = 0;
+   if(volume_digits==0 && lot_step>0.0)
+     {
+      double step = lot_step;
+      while(step<1.0 && volume_digits<8)
+        {
+         step*=10.0;
+         volume_digits++;
+        }
+     }
 
-   double point_value = tick_value / tick_size;
-   double lot = risk_amount / (stop_loss_points * _Point * point_value);
+   double equity      = AccountInfoDouble(ACCOUNT_EQUITY);
+   double risk_amount = equity * InpRiskPerTrade / 100.0;
+   double tick_value  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tick_size   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
 
-   lot = MathFloor(lot/lot_step) * lot_step;
+   double point_value = 0.0;
+   if(tick_value>0.0 && tick_size>0.0)
+      point_value = tick_value / tick_size;
+
+   double risk_lot = 0.0;
+   if(stop_loss_points>0.0 && point_value>0.0)
+      risk_lot = risk_amount / (stop_loss_points * _Point * point_value);
+
+   if(lot_step>0.0 && risk_lot>0.0)
+      risk_lot = MathFloor(risk_lot/lot_step) * lot_step;
+
+   double lot = risk_lot;
+   if(lot<=0.0 || !MathIsValidNumber(lot))
+      lot = min_lot;
+
    lot = MathMax(min_lot, MathMin(max_lot, lot));
+   lot = NormalizeDouble(lot, volume_digits);
+
+   bool override_used = false;
+   if(InpInitialLot>0.0)
+     {
+      double override = InpInitialLot;
+      if(lot_step>0.0)
+         override = MathFloor(override/lot_step + 0.5) * lot_step;
+      override = MathMax(min_lot, MathMin(max_lot, override));
+      override = NormalizeDouble(override, volume_digits);
+      if(InpVerboseLogging && risk_lot>0.0 && override>risk_lot)
+         LogEvent(StringFormat("Initial lot %.2f exceeds risk-based %.2f; override applied", override, risk_lot));
+
+      if(risk_lot<=0.0 || override>lot)
+        {
+         lot = override;
+         override_used = true;
+        }
+     }
+
+   lot = MathMax(min_lot, MathMin(max_lot, lot));
+   lot = NormalizeDouble(lot, volume_digits);
+
+   if(InpVerboseLogging && override_used)
+      LogEvent(StringFormat("Initial lot override applied (%.2f lots)", lot));
 
    return(lot);
   }
