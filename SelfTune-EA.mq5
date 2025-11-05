@@ -9,6 +9,10 @@
 #property strict
 
 #include <Trade\Trade.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\DealInfo.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\HistoryOrderInfo.mqh>
 
 const int     MAX_VOLUME_BUFFER = 512;
 
@@ -262,9 +266,23 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
         }
      }
 
-   if(entry_type==DEAL_ENTRY_OUT)
-     {
-      string direction = (deal_type==DEAL_TYPE_SELL || deal_type==DEAL_TYPE_SELL_LIMIT || deal_type==DEAL_TYPE_SELL_STOP) ? "CLOSE_BUY" : "CLOSE_SELL";
+     if(entry_type==DEAL_ENTRY_OUT)
+      {
+       ENUM_DEAL_TYPE deal_type_enum = (ENUM_DEAL_TYPE)deal_type;
+       bool closing_buy = false;
+       switch(deal_type_enum)
+         {
+          case DEAL_TYPE_SELL:
+          case DEAL_TYPE_SELL_LIMIT:
+          case DEAL_TYPE_SELL_STOP:
+          case DEAL_TYPE_SELL_STOP_LIMIT:
+             closing_buy = true;
+             break;
+          default:
+             closing_buy = false;
+             break;
+         }
+       string direction = closing_buy ? "CLOSE_BUY" : "CLOSE_SELL";
       if(profit>=0)
          g_stats.window_wins++;
       else
@@ -539,7 +557,10 @@ bool RiskChecks()
      }
 
    datetime now_time = TimeCurrent();
-   if(TimeDay(g_risk.daily_marker)!=TimeDay(now_time))
+   MqlDateTime now_struct, marker_struct;
+   TimeToStruct(now_time, now_struct);
+   TimeToStruct(g_risk.daily_marker, marker_struct);
+   if(now_struct.year!=marker_struct.year || now_struct.mon!=marker_struct.mon || now_struct.day!=marker_struct.day)
      {
       g_risk.daily_marker = now_time;
       g_risk.daily_start_equity = equity;
@@ -635,9 +656,14 @@ void ManageGrid(const double atr_points)
    double min_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double max_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double lot_step  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   int    vol_digits= (int)SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS);
-   if(vol_digits<0)
-      vol_digits = 2;
+   long   volume_digits = 0;
+   int    vol_digits = 2;
+   if(SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS, volume_digits))
+     {
+      vol_digits = (int)volume_digits;
+      if(vol_digits<0)
+         vol_digits = 2;
+     }
 
    if(pos_type==POSITION_TYPE_BUY)
      {
