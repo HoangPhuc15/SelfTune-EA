@@ -255,31 +255,45 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    double deal_volume         = (result.volume>0.0 ? result.volume : request.volume);
    double deal_price          = (result.price>0.0 ? result.price : request.price);
 
-   datetime history_from = (trans.time>86400 ? trans.time-86400 : 0);
-   datetime history_to   = trans.time+86400;
-   bool history_ready    = HistorySelect(history_from, history_to);
+   bool history_ready = HistoryDealSelect(trans.deal);
+   if(history_ready)
+     {
+      long entry_raw = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+      if(entry_raw!=WRONG_VALUE)
+         entry_type = (ENUM_DEAL_ENTRY)entry_raw;
+
+      long type_raw = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+      if(type_raw!=WRONG_VALUE)
+         deal_type = (ENUM_DEAL_TYPE)type_raw;
+
+      double hist_profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+      if(MathIsValidNumber(hist_profit))
+         profit = hist_profit;
+
+      double hist_volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+      if(hist_volume>0.0)
+         deal_volume = hist_volume;
+
+      double hist_price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+      if(hist_price>0.0)
+         deal_price = hist_price;
+     }
+
    if(!history_ready)
-      HistorySelect(0, TimeCurrent());
+     {
+      if(trans.deal_type==DEAL_TYPE_BUY || trans.deal_type==DEAL_TYPE_SELL)
+         deal_type = trans.deal_type;
 
-   long entry_raw = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-   if(entry_raw!=WRONG_VALUE)
-      entry_type = (ENUM_DEAL_ENTRY)entry_raw;
+      if(request.volume>0.0)
+         deal_volume = request.volume;
+      if(result.volume>0.0)
+         deal_volume = result.volume;
 
-   long type_raw = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
-   if(type_raw!=WRONG_VALUE)
-      deal_type = (ENUM_DEAL_TYPE)type_raw;
-
-   double hist_profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
-   if(MathIsValidNumber(hist_profit))
-      profit = hist_profit;
-
-   double hist_volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
-   if(hist_volume>0.0)
-      deal_volume = hist_volume;
-
-   double hist_price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
-   if(hist_price>0.0)
-      deal_price = hist_price;
+      if(request.price>0.0)
+         deal_price = request.price;
+      if(result.price>0.0)
+         deal_price = result.price;
+     }
 
    bool entry_is_in  = (entry_type==DEAL_ENTRY_IN || entry_type==DEAL_ENTRY_IN_BY);
    bool entry_is_out = (entry_type==DEAL_ENTRY_OUT || entry_type==DEAL_ENTRY_OUT_BY);
