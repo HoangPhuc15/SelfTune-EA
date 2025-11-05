@@ -10,7 +10,6 @@
 
 #include <Trade/Trade.mqh>
 #include <Trade/SymbolInfo.mqh>
-#include <Trade/DealInfo.mqh>
 #include <Trade/PositionInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
 
@@ -256,24 +255,31 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    double deal_volume         = (result.volume>0.0 ? result.volume : request.volume);
    double deal_price          = (result.price>0.0 ? result.price : request.price);
 
-   CDealInfo deal_info;
-   if(deal_info.Select(trans.deal))
-     {
-      entry_type = (ENUM_DEAL_ENTRY)deal_info.Entry();
-      deal_type  = (ENUM_DEAL_TYPE)deal_info.Type();
+   datetime history_from = (trans.time>86400 ? trans.time-86400 : 0);
+   datetime history_to   = trans.time+86400;
+   bool history_ready    = HistorySelect(history_from, history_to);
+   if(!history_ready)
+      HistorySelect(0, TimeCurrent());
 
-      double hist_profit = deal_info.Profit();
-      if(MathIsValidNumber(hist_profit))
-         profit = hist_profit;
+   long entry_raw = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(entry_raw!=WRONG_VALUE)
+      entry_type = (ENUM_DEAL_ENTRY)entry_raw;
 
-      double hist_volume = deal_info.Volume();
-      if(hist_volume>0.0)
-         deal_volume = hist_volume;
+   long type_raw = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+   if(type_raw!=WRONG_VALUE)
+      deal_type = (ENUM_DEAL_TYPE)type_raw;
 
-      double hist_price = deal_info.Price();
-      if(hist_price>0.0)
-         deal_price = hist_price;
-     }
+   double hist_profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+   if(MathIsValidNumber(hist_profit))
+      profit = hist_profit;
+
+   double hist_volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+   if(hist_volume>0.0)
+      deal_volume = hist_volume;
+
+   double hist_price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+   if(hist_price>0.0)
+      deal_price = hist_price;
 
    bool entry_is_in  = (entry_type==DEAL_ENTRY_IN || entry_type==DEAL_ENTRY_IN_BY);
    bool entry_is_out = (entry_type==DEAL_ENTRY_OUT || entry_type==DEAL_ENTRY_OUT_BY);
