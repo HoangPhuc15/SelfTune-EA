@@ -256,15 +256,21 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    double deal_volume         = (result.volume>0.0 ? result.volume : request.volume);
    double deal_price          = (result.price>0.0 ? result.price : request.price);
 
-   if(HistoryDealSelect(trans.deal))
+   datetime history_from = (trans.time>86400 ? trans.time-86400 : 0);
+   datetime history_to   = trans.time+86400;
+   if(HistorySelect(history_from, history_to))
      {
       long entry_raw = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-      entry_type = (ENUM_DEAL_ENTRY)entry_raw;
+      if(entry_raw!=-1)
+         entry_type = (ENUM_DEAL_ENTRY)entry_raw;
 
       long type_raw = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
-      deal_type = (ENUM_DEAL_TYPE)type_raw;
+      if(type_raw!=-1)
+         deal_type = (ENUM_DEAL_TYPE)type_raw;
 
       double hist_profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+      if(!MathIsValidNumber(hist_profit))
+         hist_profit = 0.0;
       profit = hist_profit;
 
       double hist_volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
@@ -725,7 +731,8 @@ void ResetGridStateIfNeeded()
   {
    double buy_volume=0.0, sell_volume=0.0;
    int total_positions = PositionsTotal();
-   for(int i=0; i<total_positions; i++)
+   int i;
+   for(i=0; i<total_positions; i++)
      {
       if(!PositionSelectByIndex(i))
          continue;
