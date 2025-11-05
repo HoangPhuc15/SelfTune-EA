@@ -755,7 +755,7 @@ double CalculateLotSize(const double stop_loss_points)
    double lot_step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double max_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   int    volume_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS);
+   int    volume_digits = 0;
 
    if(min_lot<=0.0)
      {
@@ -777,6 +777,8 @@ double CalculateLotSize(const double stop_loss_points)
          volume_digits++;
         }
      }
+   if(volume_digits==0 && lot_step<=0.0)
+      volume_digits = 2;
 
    double equity      = AccountInfoDouble(ACCOUNT_EQUITY);
    double risk_amount = equity * InpRiskPerTrade / 100.0;
@@ -801,28 +803,28 @@ double CalculateLotSize(const double stop_loss_points)
    lot = MathMax(min_lot, MathMin(max_lot, lot));
    lot = NormalizeDouble(lot, volume_digits);
 
-   bool override_used = false;
+   bool initial_override_used = false;
    if(InpInitialLot>0.0)
      {
-      double override = InpInitialLot;
+      double override_lot = InpInitialLot;
       if(lot_step>0.0)
-         override = MathFloor(override/lot_step + 0.5) * lot_step;
-      override = MathMax(min_lot, MathMin(max_lot, override));
-      override = NormalizeDouble(override, volume_digits);
-      if(InpVerboseLogging && risk_lot>0.0 && override>risk_lot)
-         LogEvent(StringFormat("Initial lot %.2f exceeds risk-based %.2f; override applied", override, risk_lot));
+         override_lot = MathFloor(override_lot/lot_step + 0.5) * lot_step;
+      override_lot = MathMax(min_lot, MathMin(max_lot, override_lot));
+      override_lot = NormalizeDouble(override_lot, volume_digits);
+      if(InpVerboseLogging && risk_lot>0.0 && override_lot>risk_lot)
+         LogEvent(StringFormat("Initial lot %.2f exceeds risk-based %.2f; override applied", override_lot, risk_lot));
 
-      if(risk_lot<=0.0 || override>lot)
+      if(risk_lot<=0.0 || override_lot>lot)
         {
-         lot = override;
-         override_used = true;
+         lot = override_lot;
+         initial_override_used = true;
         }
      }
 
    lot = MathMax(min_lot, MathMin(max_lot, lot));
    lot = NormalizeDouble(lot, volume_digits);
 
-   if(InpVerboseLogging && override_used)
+   if(InpVerboseLogging && initial_override_used)
       LogEvent(StringFormat("Initial lot override applied (%.2f lots)", lot));
 
    return(lot);
