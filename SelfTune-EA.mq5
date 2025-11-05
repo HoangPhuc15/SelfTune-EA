@@ -256,28 +256,21 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    double deal_volume         = (result.volume>0.0 ? result.volume : request.volume);
    double deal_price          = (result.price>0.0 ? result.price : request.price);
 
-   datetime history_from = (trans.time>86400 ? trans.time-86400 : 0);
-   datetime history_to   = trans.time+86400;
-   if(HistorySelect(history_from, history_to))
+   CDealInfo deal_info;
+   if(deal_info.Select(trans.deal))
      {
-      long entry_raw = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-      if(entry_raw!=-1)
-         entry_type = (ENUM_DEAL_ENTRY)entry_raw;
+      entry_type = (ENUM_DEAL_ENTRY)deal_info.Entry();
+      deal_type  = (ENUM_DEAL_TYPE)deal_info.Type();
 
-      long type_raw = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
-      if(type_raw!=-1)
-         deal_type = (ENUM_DEAL_TYPE)type_raw;
+      double hist_profit = deal_info.Profit();
+      if(MathIsValidNumber(hist_profit))
+         profit = hist_profit;
 
-      double hist_profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
-      if(!MathIsValidNumber(hist_profit))
-         hist_profit = 0.0;
-      profit = hist_profit;
-
-      double hist_volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+      double hist_volume = deal_info.Volume();
       if(hist_volume>0.0)
          deal_volume = hist_volume;
 
-      double hist_price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+      double hist_price = deal_info.Price();
       if(hist_price>0.0)
          deal_price = hist_price;
      }
@@ -731,10 +724,12 @@ void ResetGridStateIfNeeded()
   {
    double buy_volume=0.0, sell_volume=0.0;
    int total_positions = PositionsTotal();
-   int i;
-   for(i=0; i<total_positions; i++)
+   for(int idx=0; idx<total_positions; idx++)
      {
-      if(!PositionSelectByIndex(i))
+      ulong ticket = PositionGetTicket(idx);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
          continue;
       if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
          continue;
