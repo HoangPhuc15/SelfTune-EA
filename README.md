@@ -1,57 +1,67 @@
-# GridMaster Pro
+# Expert Advisor Readme
 
-GridMaster Pro is a MetaTrader 5 Expert Advisor (EA) that implements a grid trading strategy. It automatically opens buy orders at regular price intervals and manages them to maximize profits.
+## Robot_ma_ifr Expert Advisor
 
-## Features
+### Overview
+The `Robot_ma_ifr` Expert Advisor is designed for automated trading on the MetaTrader 5 platform. It combines two popular technical indicators, Moving Averages (MM) and the Relative Strength Index (IFR), to generate buy and sell signals based on user-defined strategies.
 
-- **Grid Trading**: Automatically opens buy orders at specified intervals (grid levels).
-- **Retry Mechanism**: Handles server busy errors by retrying the order submission.
-- **Customizable Parameters**: Lot size, grid distance, and maximum orders can be configured.
+### Parameters
 
-## Installation
+1. **Estratégia de Entrada (Entry Strategy)**
+   - Options: APENAS_MM (Only Moving Averages), APENAS_IFR (Only Relative Strength Index), MM_E_IFR (Moving Averages and Relative Strength Index)
+   - Description: Select the strategy for generating entry signals.
 
-1. Download the `GridMasterPro.mq5` file from this repository.
-2. Place the file in the `Experts` directory of your MetaTrader 5 installation.
-3. Restart MetaTrader 5 or refresh the Expert Advisors section.
-4. Attach the EA to a chart, configure the input parameters, and start trading.
+2. **Médias Móveis (Moving Averages)**
+   - `mm_rapida_periodo`: Period of the fast moving average.
+   - `mm_lenta_periodo`: Period of the slow moving average.
+   - `mm_tempo_grafico`: Timeframe for moving averages.
+   - `mm_method`: Method for calculating moving averages.
+   - `mm_preco`: Applied price for moving averages.
+   
+3. **IFR (Relative Strength Index)**
+   - `ifr_periodo`: Period of the Relative Strength Index.
+   - `ifr_tempo_grafico`: Timeframe for the Relative Strength Index.
+   - `ifr_preco`: Applied price for the Relative Strength Index.
+   - `ifr_sobrecompra`: Overbought level for the Relative Strength Index.
+   - `ifr_sobrevenda`: Oversold level for the Relative Strength Index.
+   
+4. **Operação (Operation)**
+   - `num_lots`: Number of lots to trade.
+   - `TK`: Take Profit distance in points.
+   - `SL`: Stop Loss distance in points.
 
-## Input Parameters
+5. **Hora Limite para Fechar Operações (Closing Time)**
+   - `hora_limite_fecha_op`: Time to close open positions.
 
-- **LotSize**: The size of each order.
-- **GridDistance**: Distance in points between grid levels.
-- **MaxOrders**: Maximum number of orders in the grid.
+### Indicators and Functions
 
-## Usage
+- **Indicators**
+  - Two moving averages and the Relative Strength Index are used to generate trading signals.
+  
+- **Functions**
+  - `desenhaLinhaVertical`: Draws a vertical line on the chart.
+  - `compraAMercado`: Places a market buy order.
+  - `vendaAMercado`: Places a market sell order.
+  - `fechaCompra`: Closes a buy position.
+  - `fechaVenda`: Closes a sell position.
+  - `temosNovaVela`: Checks if a new candle has started.
 
-1. Attach the EA to a chart with sufficient historical data.
-2. Set the desired input parameters.
-3. Enable "AutoTrading" in MetaTrader 5.
-4. Monitor the EA's performance and adjust settings as needed.
+### Usage
 
-## Example
+1. **Installation**
+   - Copy the `Robot_ma_ifr.mq5` file to the `Experts` folder of your MetaTrader 5 installation.
 
-```mql5
-input double LotSize = 0.1;
-input double GridDistance = 50; // Distance between orders in points
-input int MaxOrders = 10; // Maximum number of orders in the grid
-```
+2. **Configuration**
+   - Open the MetaEditor, compile the `Robot_ma_ifr.mq5` file, and attach the EA to a chart in MetaTrader 5.
+   - Configure the parameters based on your preferred trading strategy.
 
-## Contribution
+3. **Execution**
+   - The EA will execute buy and sell orders based on the selected strategy and parameters.
 
-Contributions are welcome! Please see the [Contribution Guide](CONTRIBUTING.md) for details on how to get involved.
+### Disclaimer
 
-## Disclaimer and Risk Warnings
+Trading involves risk, and it's important to thoroughly test any strategy before using it in a live trading environment. The `Robot_ma_ifr` Expert Advisor is provided as-is, and the user is responsible for any financial losses incurred through its use.
 
-Trading any financial market involves risk. All forms of trading carry a high level of risk, so you should only speculate with money you can afford to lose. You can lose more than your initial deposit and stake. Please ensure your chosen method matches your investment objectives, familiarize yourself with the risks involved, and if necessary, seek independent advice.
+### Author Information
 
-### NFA and CFTC Required Disclaimers
-
-Trading in the Foreign Exchange market, Futures Market, Options, or the Stock Market is a challenging opportunity where above-average returns are available for educated and experienced investors who are willing to take above-average risks. However, before deciding to participate in Foreign Exchange (FX) trading, or in Trading Futures, Options, or stocks, you should carefully consider your investment objectives, level of experience, and risk appetite.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Author
-
-[Sajid Mahamud](https://www.mql5.com/en/users/sajidmahamud835)
+- **Author:** Douglas Volcato
