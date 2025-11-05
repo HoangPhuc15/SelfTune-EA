@@ -8,11 +8,11 @@
 #property version   "1.00"
 #property strict
 
-#include <Trade\Trade.mqh>
-#include <Trade\SymbolInfo.mqh>
-#include <Trade\DealInfo.mqh>
-#include <Trade\PositionInfo.mqh>
-#include <Trade\HistoryOrderInfo.mqh>
+#include <Trade/Trade.mqh>
+#include <Trade/SymbolInfo.mqh>
+#include <Trade/DealInfo.mqh>
+#include <Trade/PositionInfo.mqh>
+#include <Trade/HistoryOrderInfo.mqh>
 
 const int     MAX_VOLUME_BUFFER = 512;
 
@@ -231,9 +231,6 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
   {
-   if(trans.type!=TRADE_TRANSACTION_DEAL)
-      return;
-
    ulong deal_ticket = trans.deal;
    if(deal_ticket==0)
       return;
@@ -268,20 +265,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 
      if(entry_type==DEAL_ENTRY_OUT)
       {
-       ENUM_DEAL_TYPE deal_type_enum = (ENUM_DEAL_TYPE)deal_type;
-       bool closing_buy = false;
-       switch(deal_type_enum)
-         {
-          case DEAL_TYPE_SELL:
-          case DEAL_TYPE_SELL_LIMIT:
-          case DEAL_TYPE_SELL_STOP:
-          case DEAL_TYPE_SELL_STOP_LIMIT:
-             closing_buy = true;
-             break;
-          default:
-             closing_buy = false;
-             break;
-         }
+       long position_type = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_TYPE);
+       bool closing_buy = (position_type==POSITION_TYPE_BUY);
        string direction = closing_buy ? "CLOSE_BUY" : "CLOSE_SELL";
       if(profit>=0)
          g_stats.window_wins++;
@@ -656,9 +641,9 @@ void ManageGrid(const double atr_points)
    double min_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double max_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double lot_step  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   long   volume_digits = 0;
+   long   volume_digits = SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS);
    int    vol_digits = 2;
-   if(SymbolInfoInteger(_Symbol, SYMBOL_VOLUME_DIGITS, volume_digits))
+   if(volume_digits>0)
      {
       vol_digits = (int)volume_digits;
       if(vol_digits<0)
