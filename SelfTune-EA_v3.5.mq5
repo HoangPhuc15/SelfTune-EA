@@ -2353,6 +2353,8 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
         {
          decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, bootstrap_probability), 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
          decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         if(InpVerboseLogging)
+            LogEvent(StringFormat("Full confirmation override: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
          return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
         }
       if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
@@ -2369,6 +2371,16 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
 
    decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, stored_probability), bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
    decision.confidence_score = MathMax(MathMax(decision.confidence_score, stored_confidence), bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   if(!partial_confirmation) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     {
+      if(InpVerboseLogging)
+        {
+         string dir_label3 = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+         LogEvent(StringFormat("Full confirmation override: pattern %s (%s) prob=%.2f conf=%.2f", decision.signal_pattern_id, dir_label3, decision.estimated_probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
+      return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
 
    if(decision.estimated_probability>=0.60 && decision.confidence_score>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
       return(true);
