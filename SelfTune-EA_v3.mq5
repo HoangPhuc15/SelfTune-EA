@@ -1998,10 +1998,11 @@ void LoadLearningData()
         }
      }
 
+   string trade_id_field;
    while(!FileIsEnding(handle))
      {
       ZeroMemory(record);
-      string trade_id_field = FileReadString(handle);
+      trade_id_field = FileReadString(handle);
        if(StringLen(trade_id_field)==0)
          {
           if(FileIsEnding(handle))
