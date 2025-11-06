@@ -1648,14 +1648,8 @@ double ComputeVolumeDeviation()
 string SafeToUpper(const string value)
   {
    string tmp = value;
-   int length = StringLen(tmp);
-   for(int i=0;i<length;i++)
-     {
-      int ch = (int)StringGetCharacter(tmp, i);
-      int up = (int)CharToUpper(ch);
-      StringSetCharacter(tmp, i, (ushort)up);
-     }
-   return(tmp); // [v3.1] manual uppercase to avoid reference requirement in older toolchains
+   StringToUpper(tmp);
+   return(tmp);
   }
 //+------------------------------------------------------------------+
 double RecentWinRate()
@@ -1959,7 +1953,6 @@ void LoadLearningData()
 
    string header_fields[];
    bool   has_extended_columns = false;
-   string trade_id_field = "";
    SLearningRecord record;
 
    for(int dir=0; dir<2; ++dir)
@@ -2008,7 +2001,7 @@ void LoadLearningData()
    while(!FileIsEnding(handle))
      {
       ZeroMemory(record);
-      trade_id_field = FileReadString(handle);
+      string trade_id_field = FileReadString(handle);
        if(StringLen(trade_id_field)==0)
          {
           if(FileIsEnding(handle))
