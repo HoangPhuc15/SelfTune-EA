@@ -298,27 +298,27 @@ void        SaveLearningData();
 void        UpdateProbabilityModel();
 void        UpdateProbabilityModel(const int dir_index, const int pattern_index);
 int         PatternIndexFromConditions(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol);
-void        EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol,
-                                       const ENUM_POSITION_TYPE direction,int &pattern_index,double &probability,
-                                       double &avg_profit,double &avg_loss);
-bool        PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,double &adjusted_lot);
+int         EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol,
+                                       const ENUM_POSITION_TYPE direction,double *probability,double *avg_profit,
+                                       double *avg_loss);
+bool        PredictTradeOutcome(const SSignalDecision decision,const double base_lot,double *adjusted_lot);
 double      AdaptiveGridSpacing(const double atr_points);
-void        PushPendingPattern(const SPatternCandidate &candidate);
-bool        PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate &candidate);
-void        RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candidate);
-bool        ExtractActiveTrade(const ulong position_id,SActiveTradeContext &context);
+void        PushPendingPattern(const SPatternCandidate candidate);
+bool        PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate *candidate);
+void        RegisterActiveTrade(const ulong position_id,const SPatternCandidate candidate);
+bool        ExtractActiveTrade(const ulong position_id,SActiveTradeContext *context);
 void        RemoveActiveTradeByIndex(const int index);
-void        RecordTradePattern(const SActiveTradeContext &context,const double profit,const ulong deal_ticket,const datetime deal_time);
-void        AppendLearningRecord(const SLearningRecord &record);
+void        RecordTradePattern(const SActiveTradeContext context,const double profit,const ulong deal_ticket,const datetime deal_time);
+void        AppendLearningRecord(const SLearningRecord record);
 void        TrimLearningBuffer();
 void        RecalculateRecentMetrics();
 double      ComputeRSIDeviation();
 double      ComputeVolumeDeviation();
 double      RecentWinRate();
-void        StoreLearningRecord(const SLearningRecord &record,const bool persist);
+void        StoreLearningRecord(const SLearningRecord record,const bool persist);
 void        EnsureLearningCapacity();
 int         LearningBufferIndex(const int ordinal);
-bool        GetLearningRecord(const int ordinal,SLearningRecord &record);
+bool        GetLearningRecord(const int ordinal,SLearningRecord *record);
 void        UpdateActiveTradeExtents();
 string      CsvQuote(const string value);
 string      CsvUnquote(const string value);
@@ -483,7 +483,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 
       ENUM_POSITION_TYPE new_direction = (deal_type==DEAL_TYPE_SELL ? POSITION_TYPE_SELL : POSITION_TYPE_BUY);
       SPatternCandidate candidate;
-      if(PopPendingPattern(new_direction, candidate))
+      if(PopPendingPattern(new_direction, &candidate))
         {
          ulong position_id = trans.position;
          if(position_id==0 && history_ready)
@@ -525,7 +525,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
         }
       SActiveTradeContext context;
       context.direction = original_direction;
-      if(position_id>0 && ExtractActiveTrade(position_id, context))
+      if(position_id>0 && ExtractActiveTrade(position_id, &context))
         {
          RecordTradePattern(context, profit, trans.deal, deal_time);
         }
@@ -814,9 +814,9 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
      if(g_buyDecision.conditions[bi])
         g_buyDecision.confirmed++;
 
-  EvaluatePatternProbability(g_buyDecision.conditions[0], g_buyDecision.conditions[1], g_buyDecision.conditions[2], g_buyDecision.conditions[3],
-                              POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.estimated_probability,
-                              g_buyDecision.avg_win, g_buyDecision.avg_loss);
+  g_buyDecision.pattern_index = EvaluatePatternProbability(g_buyDecision.conditions[0], g_buyDecision.conditions[1], g_buyDecision.conditions[2], g_buyDecision.conditions[3],
+                                                           POSITION_TYPE_BUY, &g_buyDecision.estimated_probability,
+                                                           &g_buyDecision.avg_win, &g_buyDecision.avg_loss);
   g_buyDecision.pattern_mask = g_buyDecision.pattern_index;
   buy_signal = (g_buyDecision.confirmed>=3);
   g_buyDecision.signal = buy_signal;
@@ -838,9 +838,9 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
      if(g_sellDecision.conditions[si])
         g_sellDecision.confirmed++;
 
-  EvaluatePatternProbability(g_sellDecision.conditions[0], g_sellDecision.conditions[1], g_sellDecision.conditions[2], g_sellDecision.conditions[3],
-                              POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.estimated_probability,
-                              g_sellDecision.avg_win, g_sellDecision.avg_loss);
+  g_sellDecision.pattern_index = EvaluatePatternProbability(g_sellDecision.conditions[0], g_sellDecision.conditions[1], g_sellDecision.conditions[2], g_sellDecision.conditions[3],
+                                                            POSITION_TYPE_SELL, &g_sellDecision.estimated_probability,
+                                                            &g_sellDecision.avg_win, &g_sellDecision.avg_loss);
   g_sellDecision.pattern_mask = g_sellDecision.pattern_index;
   sell_signal = (g_sellDecision.confirmed>=3);
   g_sellDecision.signal = sell_signal;
@@ -865,10 +865,10 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    bool buy_allowed = buy_signal;
    bool sell_allowed = sell_signal;
 
-   if(buy_signal)
-      buy_allowed = PredictTradeOutcome(g_buyDecision, base_lot, buy_lot);
-   if(sell_signal)
-      sell_allowed = PredictTradeOutcome(g_sellDecision, base_lot, sell_lot);
+  if(buy_signal)
+     buy_allowed = PredictTradeOutcome(g_buyDecision, base_lot, &buy_lot);
+  if(sell_signal)
+     sell_allowed = PredictTradeOutcome(g_sellDecision, base_lot, &sell_lot);
 
    double price = 0.0;
    bool trade_result = false;
@@ -1254,24 +1254,31 @@ int PatternIndexFromConditions(const bool cond_ma,const bool cond_rsi,const bool
    return(index);
   }
 //+------------------------------------------------------------------+
-void EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol,
-                                const ENUM_POSITION_TYPE direction,int &pattern_index,double &probability,
-                                double &avg_profit,double &avg_loss)
+int EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol,
+                               const ENUM_POSITION_TYPE direction,double *probability,double *avg_profit,
+                               double *avg_loss)
   {
    //--- map the current signal conditions into a bit-pattern and query the rolling probability model
-   pattern_index = PatternIndexFromConditions(cond_ma, cond_rsi, cond_mfi, cond_vol);
+   int pattern_index = PatternIndexFromConditions(cond_ma, cond_rsi, cond_mfi, cond_vol);
    int dir_index = (direction==POSITION_TYPE_SELL ? 1 : 0);
    SPatternModel model = g_patternModel[dir_index][pattern_index];
-   probability = model.probability;
-   avg_profit  = model.average_win;
-  avg_loss    = model.average_loss;
-   if(g_learningCount<MIN_LEARNING_ACTIVATION && probability<0.5)
-      probability = 0.5;
-  if(probability<=0.0)
-      probability = 0.5;
+   double prob = model.probability;
+   double win_avg = model.average_win;
+   double loss_avg = model.average_loss;
+   if(g_learningCount<MIN_LEARNING_ACTIVATION && prob<0.5)
+      prob = 0.5;
+   if(prob<=0.0)
+      prob = 0.5;
+   if(probability!=NULL)
+      *probability = prob;
+   if(avg_profit!=NULL)
+      *avg_profit = win_avg;
+   if(avg_loss!=NULL)
+      *avg_loss = loss_avg;
+   return(pattern_index); // [v3.1] expose pattern index while avoiding reference-based outputs
   }
 //+------------------------------------------------------------------+
-bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,double &adjusted_lot)
+bool PredictTradeOutcome(const SSignalDecision decision,const double base_lot,double *adjusted_lot)
   {
    //--- enforce the 3-of-4 confirmation rule before looking at probabilities
    if(decision.confirmations_required>0 && decision.confirmed<decision.confirmations_required)
@@ -1287,7 +1294,8 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,d
 
    if(probability>=InpProbabilityThreshold)
      {
-      adjusted_lot = base_lot;
+      if(adjusted_lot!=NULL)
+         *adjusted_lot = base_lot; // [v3.1] pointer-compatible output for legacy compilers
       return(true);
      }
 
@@ -1302,10 +1310,15 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,d
    scale = MathMax(InpConfidenceFloor, MathMin(1.0, scale));
    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   adjusted_lot = MathMax(base_lot * scale, min_lot);
+   double lot_value = MathMax(base_lot * scale, min_lot);
    if(lot_step>0.0)
-      adjusted_lot = MathFloor(adjusted_lot/lot_step)*lot_step;
-   adjusted_lot = MathMax(adjusted_lot, min_lot);
+      lot_value = MathFloor(lot_value/lot_step)*lot_step;
+   lot_value = MathMax(lot_value, min_lot);
+   double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(lot_value>max_lot)
+      lot_value = max_lot;
+   if(adjusted_lot!=NULL)
+      *adjusted_lot = lot_value; // [v3.1] return scaled lot via pointer to avoid reference parameters
    LogEvent(StringFormat("Lot adjusted by probability %.2f -> scale %.2f", probability, scale));
    return(true);
   }
@@ -1332,21 +1345,22 @@ double AdaptiveGridSpacing(const double atr_points)
    return(adaptive);
   }
 //+------------------------------------------------------------------+
-void PushPendingPattern(const SPatternCandidate &candidate)
+void PushPendingPattern(const SPatternCandidate candidate)
   {
    int size = ArraySize(g_pendingPatterns);
    ArrayResize(g_pendingPatterns, size+1);
    g_pendingPatterns[size] = candidate;
   }
 //+------------------------------------------------------------------+
-bool PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate &candidate)
+bool PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate *candidate)
   {
    int size = ArraySize(g_pendingPatterns);
    for(int i=0;i<size;i++)
      {
       if(g_pendingPatterns[i].direction==direction)
         {
-         candidate = g_pendingPatterns[i];
+         if(candidate!=NULL)
+            *candidate = g_pendingPatterns[i];
          for(int j=i;j<size-1;j++)
             g_pendingPatterns[j] = g_pendingPatterns[j+1];
          ArrayResize(g_pendingPatterns, size-1);
@@ -1356,7 +1370,7 @@ bool PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate &can
    return(false);
   }
 //+------------------------------------------------------------------+
-void RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candidate)
+void RegisterActiveTrade(const ulong position_id,const SPatternCandidate candidate)
   {
    if(position_id==0)
       return;
@@ -1382,14 +1396,15 @@ void RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candid
    g_activeTrades[size].is_grid      = candidate.is_grid;
   }
 //+------------------------------------------------------------------+
-bool ExtractActiveTrade(const ulong position_id,SActiveTradeContext &context)
+bool ExtractActiveTrade(const ulong position_id,SActiveTradeContext *context)
   {
    int size = ArraySize(g_activeTrades);
    for(int i=0;i<size;i++)
      {
       if(g_activeTrades[i].position_id==position_id)
         {
-         context = g_activeTrades[i];
+         if(context!=NULL)
+            *context = g_activeTrades[i];
          RemoveActiveTradeByIndex(i);
          return(true);
         }
@@ -1407,7 +1422,7 @@ void RemoveActiveTradeByIndex(const int index)
    ArrayResize(g_activeTrades,size-1);
   }
 //+------------------------------------------------------------------+
-void RecordTradePattern(const SActiveTradeContext &context,const double profit,const ulong deal_ticket,const datetime deal_time)
+void RecordTradePattern(const SActiveTradeContext context,const double profit,const ulong deal_ticket,const datetime deal_time)
   {
    if(context.pattern_index<0 || context.pattern_index>=PATTERN_COMBINATIONS)
       return;
@@ -1456,12 +1471,12 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
      }
   }
 //+------------------------------------------------------------------+
-void AppendLearningRecord(const SLearningRecord &record)
+void AppendLearningRecord(const SLearningRecord record)
   {
    StoreLearningRecord(record, true); // [v3.1] funnel through FIFO storage routine
   }
 //+------------------------------------------------------------------+
-void StoreLearningRecord(const SLearningRecord &record,const bool persist)
+void StoreLearningRecord(const SLearningRecord record,const bool persist)
   {
    EnsureLearningCapacity();
    int capacity = ArraySize(g_learningRecords);
@@ -1534,12 +1549,13 @@ int LearningBufferIndex(const int ordinal)
    return((g_learningHead + ordinal) % capacity); // [v3.1] translate ordinal into ring index
   }
 //+------------------------------------------------------------------+
-bool GetLearningRecord(const int ordinal,SLearningRecord &record)
+bool GetLearningRecord(const int ordinal,SLearningRecord *record)
   {
    int idx = LearningBufferIndex(ordinal);
    if(idx<0)
       return(false);
-   record = g_learningRecords[idx];
+   if(record!=NULL)
+      *record = g_learningRecords[idx];
    return(true);
   }
 //+------------------------------------------------------------------+
@@ -1578,9 +1594,9 @@ void RecalculateRecentMetrics()
          start_index = 0;
       for(int ordinal=start_index; ordinal<g_learningCount; ordinal++)
         {
-         SLearningRecord sample; // [v3.1] pull samples through FIFO helper
-         if(!GetLearningRecord(ordinal, sample))
-            continue;
+        SLearningRecord sample; // [v3.1] pull samples through FIFO helper
+        if(!GetLearningRecord(ordinal, &sample))
+          continue;
          g_stats.window_profit += sample.profit;
          if(sample.result>0)
             g_stats.window_wins++;
@@ -1595,10 +1611,10 @@ void RecalculateRecentMetrics()
    for(int i=0;i<sample_window;i++)
      {
       int ordinal = g_learningCount - sample_window + i;
-      SLearningRecord sample;
-      if(GetLearningRecord(ordinal, sample))
-        {
-         g_recentRSI[i] = sample.rsi;
+        SLearningRecord sample;
+        if(GetLearningRecord(ordinal, &sample))
+          {
+           g_recentRSI[i] = sample.rsi;
          g_recentVolume[i] = sample.volume;
         }
       else
@@ -1637,6 +1653,19 @@ double ComputeVolumeDeviation()
    return(accum / (double)count);
   }
 //+------------------------------------------------------------------+
+string SafeToUpper(const string value)
+  {
+   string tmp = value;
+   int length = StringLen(tmp);
+   for(int i=0;i<length;i++)
+     {
+      ushort ch = StringGetCharacter(tmp, i);
+      ushort up = (ushort)CharToUpper(ch);
+      StringSetCharacter(tmp, i, up);
+     }
+   return(tmp); // [v3.1] manual uppercase to avoid reference requirement in older toolchains
+  }
+//+------------------------------------------------------------------+
 double RecentWinRate()
   {
    if(g_stats.window_trades==0)
@@ -1656,9 +1685,9 @@ double RecentAverageProfit(const int window)
       start = 0;
    for(int ordinal=start; ordinal<g_learningCount; ordinal++)
      {
-      SLearningRecord rec;
-      if(!GetLearningRecord(ordinal, rec))
-         continue;
+        SLearningRecord rec;
+        if(!GetLearningRecord(ordinal, &rec))
+          continue;
       total += rec.profit;
       counted++;
      }
@@ -1683,11 +1712,10 @@ void UpdateProbabilityModel()
 
   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
     {
-     SLearningRecord record; // [v3.1] iterate over FIFO-ordered cache
-     if(!GetLearningRecord(ordinal, record))
-        continue;
-     string signal_upper = record.signal_type;
-     StringToUpper(signal_upper);
+      SLearningRecord record; // [v3.1] iterate over FIFO-ordered cache
+      if(!GetLearningRecord(ordinal, &record))
+         continue;
+      string signal_upper = SafeToUpper(record.signal_type);
      int dir_index = 0;
       if(StringFind(signal_upper, "SELL")!=-1)
          dir_index = 1;
@@ -1845,7 +1873,7 @@ void SelfTuneParameters()
    for(int ordinal=0; ordinal<g_learningCount; ordinal++)
      {
       SLearningRecord rec;
-      if(!GetLearningRecord(ordinal, rec))
+      if(!GetLearningRecord(ordinal, &rec))
          continue;
       if(rec.result>0)
         {
@@ -1972,20 +2000,21 @@ void LoadLearningData()
         }
      }
 
-   bool has_extended_columns = false;
-   for(int i=0;i<ArraySize(header_fields);i++)
-     {
-      if(StringCompare(header_fields[i], "EquityBefore")==0)
-        {
-         has_extended_columns = true;
-         break;
-        }
-     }
+  bool has_extended_columns = false;
+  for(int i=0;i<ArraySize(header_fields);i++)
+    {
+     if(StringCompare(header_fields[i], "EquityBefore")==0)
+       {
+        has_extended_columns = true;
+        break;
+       }
+    }
 
-   while(!FileIsEnding(handle))
-     {
-      SLearningRecord record;
-      string trade_id_field = FileReadString(handle);
+  string trade_id_field = "";
+  while(!FileIsEnding(handle))
+    {
+     SLearningRecord record;
+     trade_id_field = FileReadString(handle);
       if(StringLen(trade_id_field)==0)
         {
          if(FileIsEnding(handle))
@@ -2050,7 +2079,7 @@ void SaveLearningData()
    for(int ordinal=0; ordinal<g_learningCount; ordinal++)
      {
       SLearningRecord record;
-      if(!GetLearningRecord(ordinal, record))
+      if(!GetLearningRecord(ordinal, &record))
          continue;
       FileWrite(handle,
                 record.trade_id,
