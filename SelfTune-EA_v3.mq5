@@ -1998,17 +1998,16 @@ void LoadLearningData()
         }
      }
 
-   string trade_id_field;
    while(!FileIsEnding(handle))
      {
       ZeroMemory(record);
-      trade_id_field = FileReadString(handle);
-       if(StringLen(trade_id_field)==0)
-         {
-          if(FileIsEnding(handle))
-             break;
-          if(FileIsLineEnding(handle))
-             continue;
+      string trade_id_field = FileReadString(handle);
+      if(StringLen(trade_id_field)==0)
+        {
+         if(FileIsEnding(handle))
+            break;
+         if(FileIsLineEnding(handle))
+            continue;
          }
        record.trade_id     = (ulong)StrToDouble(trade_id_field);
        record.symbol       = CsvUnquote(FileReadString(handle));
