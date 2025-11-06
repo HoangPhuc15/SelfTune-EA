@@ -362,7 +362,7 @@ int         PatternIndexFromConditions(const bool cond_ma,const bool cond_rsi,co
 int         EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol,
                                        const ENUM_POSITION_TYPE direction,double &probability,double &avg_profit,
                                        double &avg_loss);
-bool        PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,double &adjusted_lot);
+bool        PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction,const double base_lot,double &adjusted_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 double      AdaptiveGridSpacing(const double atr_points);
 void        PushPendingPattern(const SPatternCandidate &candidate);
 bool        PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate &candidate);
@@ -394,6 +394,8 @@ double      ComputePatternConfidence(const ENUM_POSITION_TYPE direction,const in
 double      ComputeBlendedProbability(const ENUM_POSITION_TYPE direction,const int pattern_index,const double regression_prob); // [v3.4] Learning-based probability system and adaptive entry
 string      BuildSignalPatternID(const ENUM_POSITION_TYPE direction,const int pattern_mask); // [v3.4] Learning-based probability system and adaptive entry
 bool        ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE direction); // [v3.4] Learning-based probability system and adaptive entry
+double      EstimateBootstrapProbability(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+double      EstimateBootstrapConfidence(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 bool        QueryPatternFromLearning(const string pattern_id,double &win_probability,double &confidence); // [v3.4] Learning-based probability system and adaptive entry
 bool        FindActiveTradeContext(const ulong position_id,SActiveTradeContext &context); // [v3.4] Learning-based probability system and adaptive entry
 
@@ -1023,9 +1025,9 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    bool sell_allowed = (sell_signal && ConfirmPatternForEntry(g_sellDecision, POSITION_TYPE_SELL)); // [v3.4] Learning-based probability system and adaptive entry
 
   if(buy_allowed)
-     buy_allowed = PredictTradeOutcome(g_buyDecision, base_lot, buy_lot);
+     buy_allowed = PredictTradeOutcome(g_buyDecision, POSITION_TYPE_BUY, base_lot, buy_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
   if(sell_allowed)
-     sell_allowed = PredictTradeOutcome(g_sellDecision, base_lot, sell_lot);
+     sell_allowed = PredictTradeOutcome(g_sellDecision, POSITION_TYPE_SELL, base_lot, sell_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
    bool trade_result = false;
 
@@ -1565,7 +1567,7 @@ int EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool
    return(pattern_index); // [v3.1] expose pattern index while avoiding reference-based outputs
   }
 //+------------------------------------------------------------------+
-bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,double &adjusted_lot)
+bool PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction,const double base_lot,double &adjusted_lot) // [v3.5 Update] Self-learning, cluster TP, and regression integration
   {
    //--- enforce the 3-of-4 confirmation rule before looking at probabilities
    if(decision.confirmations_required>0 && decision.confirmed<decision.confirmations_required)
@@ -1574,8 +1576,11 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,d
       return(false);
      }
    double probability = decision.estimated_probability;
+   double bootstrap_probability = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(probability<bootstrap_probability)
+      probability = bootstrap_probability; // [v3.5 Update] Self-learning, cluster TP, and regression integration
    if(g_learningCount<MIN_LEARNING_ACTIVATION)
-      probability = MathMax(probability, 0.5);
+      probability = MathMax(probability, 0.58); // [v3.5 Update] Self-learning, cluster TP, and regression integration
    if(probability<=0.0)
       probability = 0.5;
 
@@ -2208,6 +2213,56 @@ double ComputeBlendedProbability(const ENUM_POSITION_TYPE direction,const int pa
    return(MathMax(0.05, MathMin(0.95, blended)));
   }
 //+------------------------------------------------------------------+
+double EstimateBootstrapProbability(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   int confirmations = MathMax(0, MathMin(PATTERN_BIT_COUNT, decision.confirmed)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double regression = (decision.regression_probability>0.0 ? decision.regression_probability : 0.5); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double base = 0.52 + (regression - 0.5) * 0.6; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   base += 0.08 * MathMax(0, confirmations - 2); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double ma_strength = MathMax(-1.0, MathMin(1.0, decision.ma_strength)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   base += ma_strength * 0.08; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double volume_ratio = MathMax(0.1, MathMin(3.0, decision.volume_ratio)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(volume_ratio>1.05)
+      base += MathMin(0.08, (volume_ratio-1.0)*0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   else if(volume_ratio<0.95)
+      base -= MathMin(0.08, (1.0-volume_ratio)*0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   if(direction==POSITION_TYPE_BUY)
+     {
+      if(decision.fast_ma>decision.slow_ma)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.rsi<=g_params.rsi_oversold)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.mfi<=g_params.mfi_oversold)
+         base += 0.04; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
+   else
+     {
+      if(decision.fast_ma<decision.slow_ma)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.rsi>=g_params.rsi_overbought)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.mfi>=g_params.mfi_overbought)
+         base += 0.04; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
+
+   return(MathMax(0.35, MathMin(0.92, base))); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  }
+//+------------------------------------------------------------------+
+double EstimateBootstrapConfidence(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   double probability_hint = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int confirmations = MathMax(0, MathMin(PATTERN_BIT_COUNT, decision.confirmed)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double confidence = 0.46 + 0.07 * MathMax(0, confirmations - 2); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   confidence += MathMin(0.12, MathAbs(probability_hint-0.5)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double regression_conf = g_regressionModel.dynamic_confidence; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(regression_conf>0.0)
+      confidence = MathMax(confidence, 0.45 + (regression_conf-0.5)*0.6); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   return(MathMax(0.35, MathMin(0.90, confidence))); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  }
+//+------------------------------------------------------------------+
 string BuildSignalPatternID(const ENUM_POSITION_TYPE direction,const int pattern_mask)
   {
    string prefix = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
@@ -2267,14 +2322,25 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
 
    bool partial_confirmation = (decision.confirmed==decision.confirmations_required && decision.confirmed<PATTERN_BIT_COUNT); // [v3.5 Update] Self-learning, cluster TP, and regression integration
    bool full_confirmation = (decision.confirmed>=PATTERN_BIT_COUNT); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double bootstrap_probability = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double bootstrap_confidence = EstimateBootstrapConfidence(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
    if(g_learningCount==0)                                           // [v3.5 Update] Self-learning, cluster TP, and regression integration
      {
       if(partial_confirmation)
         {
+         if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+           {
+            decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            LogEvent(StringFormat("Bootstrap trade approval: prob=%.2f conf=%.2f", bootstrap_probability, bootstrap_confidence)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            return(true);
+           }
          LogEvent("Trade skipped: learning cache empty for partial confirmation"); // [v3.5 Update] Self-learning, cluster TP, and regression integration
          return(false);
         }
+      decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
       return(true);
      }
 
@@ -2284,16 +2350,27 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
    if(!has_history)
      {
       if(full_confirmation)
+        {
+         decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, bootstrap_probability), 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
          return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
+      if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        {
+         decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         LogEvent(StringFormat("Bootstrap trade approval: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, bootstrap_probability, bootstrap_confidence)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         return(true);
+        }
       string dir_label = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
       LogEvent(StringFormat("Trade skipped: pattern %s (%s) not in learning cache", decision.signal_pattern_id, dir_label)); // [v3.4]
       return(false);
      }
 
-   decision.estimated_probability = MathMax(decision.estimated_probability, stored_probability);
-   decision.confidence_score = MathMax(decision.confidence_score, stored_confidence);
+   decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, stored_probability), bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   decision.confidence_score = MathMax(MathMax(decision.confidence_score, stored_confidence), bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
-   if(stored_probability>=0.60 && stored_confidence>=0.50)
+   if(decision.estimated_probability>=0.60 && decision.confidence_score>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
       return(true);
 
    string dir_label2 = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
