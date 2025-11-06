@@ -1246,40 +1246,42 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
    ulong  cluster_tickets[];
    ArrayResize(cluster_tickets, 0);
 
-   for(int i=0;i<total_positions;i++)
-     {
-      if(!PositionSelectByIndex(i))
-         continue;
-      string pos_symbol = PositionGetString(POSITION_SYMBOL);
-      if(pos_symbol!=_Symbol)
-         continue;
-      ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      if(pos_type!=direction)
-         continue;
+    for(int i=0;i<total_positions;i++)
+      {
+       ulong ticket = PositionGetTicket(i);
+       if(ticket==0)
+          continue; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+       if(!PositionSelectByTicket(ticket))
+          continue; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+       string pos_symbol = PositionGetString(POSITION_SYMBOL);
+       if(pos_symbol!=_Symbol)
+          continue;
+       ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+       if(pos_type!=direction)
+          continue;
 
-      double volume = PositionGetDouble(POSITION_VOLUME);
-      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-      if(volume<=0.0)
-         continue;
+       double volume = PositionGetDouble(POSITION_VOLUME);
+       double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+       if(volume<=0.0)
+          continue;
 
-      total_volume += volume;
-      weighted_price += open_price * volume;
-      profit_sum += PositionGetDouble(POSITION_PROFIT);
+       total_volume += volume;
+       weighted_price += open_price * volume;
+       profit_sum += PositionGetDouble(POSITION_PROFIT);
 
-      ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
-      ArrayResize(cluster_tickets, order_count+1);
-      cluster_tickets[order_count] = ticket;
-      order_count++;
+       ArrayResize(cluster_tickets, order_count+1);
+       cluster_tickets[order_count] = ticket;
+       order_count++;
 
-      SActiveTradeContext context;
-      if(ticket>0 && FindActiveTradeContext(ticket, context))
-        {
-         double ctx_prob = (context.win_probability>0.0 ? context.win_probability : context.probability);
-         double ctx_conf = (context.confidence_score>0.0 ? context.confidence_score : g_lastDecisionConfidence);
-         probability_sum += ctx_prob;
-         confidence_sum += ctx_conf;
-        }
-     }
+       SActiveTradeContext context;
+       if(ticket>0 && FindActiveTradeContext(ticket, context))
+         {
+          double ctx_prob = (context.win_probability>0.0 ? context.win_probability : context.probability);
+          double ctx_conf = (context.confidence_score>0.0 ? context.confidence_score : g_lastDecisionConfidence);
+          probability_sum += ctx_prob;
+          confidence_sum += ctx_conf;
+         }
+      }
 
    if(order_count<=0 || total_volume<=0.0)
       return;
