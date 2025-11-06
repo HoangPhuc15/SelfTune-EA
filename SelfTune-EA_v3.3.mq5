@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                                SelfTune-EA_v3.mq5 |
+//|                                                SelfTune-EA_v3.3.mq5 | // [v3.3] Adaptive TakeProfit based on learning data
 //|                                                     SelfTune Labs |
 //|                Probability enhanced adaptive grid Expert Advisor |
 //+------------------------------------------------------------------+
 #property copyright "SelfTune Labs"
 #property link      "https://github.com/SelfTune"
-#property version   "3.00"
+#property version   "3.30" // [v3.3] Adaptive TakeProfit based on learning data
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -60,6 +60,11 @@ input double            InpDailyLoss       = 5.0;            // Max daily loss b
 input double            InpATRMultiplierSL = 3.0;            // ATR multiplier for stop loss
 input double            InpATRMultiplierTP = 4.5;            // ATR multiplier for take profit
 input int               InpATRPeriod       = 14;             // ATR period
+
+sinput string sepTP="--- TakeProfit Settings ---"; // [v3.3] Adaptive TakeProfit based on learning data
+input double            InpVirtualTPDistance   = 80.0;        // Virtual take profit distance (points) // [v3.3] Adaptive TakeProfit based on learning data
+input double            InpTPReductionPerOrder = 14.0;        // TP reduction per recovery order (points) // [v3.3] Adaptive TakeProfit based on learning data
+input int               InpTPOverlapThreshold  = 2;           // Orders before TP reduction activates // [v3.3] Adaptive TakeProfit based on learning data
 
 sinput string sep2="--- Grid Control ---";
 input bool              InpUseGrid         = true;           // Enable grid module
@@ -203,6 +208,17 @@ struct SSignalDecision
    int                 pattern_mask;
   };
 
+struct STakeProfitState
+  {
+   double   base_virtual_points;     // [v3.3] Adaptive TakeProfit based on learning data
+   double   active_virtual_points;   // [v3.3] Adaptive TakeProfit based on learning data
+   double   base_reduction_points;   // [v3.3] Adaptive TakeProfit based on learning data
+   double   active_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   int      base_overlap_threshold;  // [v3.3] Adaptive TakeProfit based on learning data
+   int      active_overlap_threshold;// [v3.3] Adaptive TakeProfit based on learning data
+   double   last_win_rate;           // [v3.3] Adaptive TakeProfit based on learning data
+  };
+
 struct SLearningRecord
   {
    // snapshot written to SelfTuneEA_learning.csv for the rolling learning system
@@ -242,6 +258,7 @@ SPatternCandidate   g_pendingPatterns[];
 SSignalDecision     g_buyDecision;
 SSignalDecision     g_sellDecision;
 SLearningRecord     g_learningRecords[];
+STakeProfitState    g_takeProfitState; // [v3.3] Adaptive TakeProfit based on learning data
 int                 g_learningCount = 0;
 int                 g_learningHead  = 0;        // [v3.1] circular buffer head index
 int                 g_sinceLastTune = 0;        // [v3.1] trades since last tuning cycle
@@ -280,11 +297,15 @@ bool        RefreshIndicators();
 bool        IsNewBar();
 void        EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points);
 void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points);
-double      CalculateLotSize(const double stop_loss_points);
+double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
 bool        RiskChecks();
 void        ManagePositions(const double atr_points);
 void        ManageGrid(const double atr_points);
 void        ResetGridStateIfNeeded();
+void        InitializeAdaptiveTakeProfit(); // [v3.3] Adaptive TakeProfit based on learning data
+void        UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
+double      DetermineAdaptiveTakeProfitPoints(const int recovery_level); // [v3.3] Adaptive TakeProfit based on learning data
+double      ComputeWindowWinRate(const int window); // [v3.3] Adaptive TakeProfit based on learning data
 void        LogEvent(const string message);
 void        LogIndicatorSnapshot();
 void        LogTrade(const ulong deal_ticket, const double deal_profit, const string direction);
@@ -366,9 +387,11 @@ int OnInit()
      }
 
    InitializeParameters();
+   InitializeAdaptiveTakeProfit(); // [v3.3] Adaptive TakeProfit based on learning data
    InitializeFiles();
    LoadState();
    LoadLearningData();
+   UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
    UpdateProbabilityModel();
 
    g_risk.start_equity       = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -601,6 +624,17 @@ void InitializeParameters()
    g_params.volume_multiplier  = MathMax(0.5, InpVolumeMultiplier);
    g_params.ma_method          = InpMAType;
    g_params.ma_price           = InpMAPrice;
+  }
+//+------------------------------------------------------------------+
+void InitializeAdaptiveTakeProfit() // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   g_takeProfitState.base_virtual_points     = MathMax(10.0, InpVirtualTPDistance); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_virtual_points   = g_takeProfitState.base_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.base_reduction_points   = MathMax(0.0, InpTPReductionPerOrder); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_reduction_points = g_takeProfitState.base_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.base_overlap_threshold  = MathMax(0, InpTPOverlapThreshold); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_overlap_threshold= g_takeProfitState.base_overlap_threshold; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.last_win_rate           = 0.5; // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 void InitializeFiles()
@@ -882,10 +916,11 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    if(!buy_signal && !sell_signal)
       return;
 
-   double stop_loss_points = atr_points * InpATRMultiplierSL;
-   double take_profit_points = atr_points * InpATRMultiplierTP;
+   double take_profit_points = DetermineAdaptiveTakeProfitPoints(0); // [v3.3] Adaptive TakeProfit based on learning data
+   double atr_floor = MathMax(atr_points * InpATRMultiplierTP, atr_points * InpATRMultiplierSL); // [v3.3] Adaptive TakeProfit based on learning data
+   double risk_points = MathMax(take_profit_points, MathMax(atr_floor, 10.0)); // [v3.3] Adaptive TakeProfit based on learning data
 
-   double base_lot = CalculateLotSize(stop_loss_points);
+   double base_lot = CalculateLotSize(risk_points); // [v3.3] Adaptive TakeProfit based on learning data
    if(base_lot<=0.0)
       return;
 
@@ -905,7 +940,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    if(buy_allowed && (!sell_allowed || PositionSelect(_Symbol)==false || PositionGetInteger(POSITION_TYPE)!=POSITION_TYPE_SELL))
      {
       price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      trade_result = g_trade.Buy(buy_lot, _Symbol, price, price - stop_loss_points*_Point, price + take_profit_points*_Point, "SelfTune BUY");
+      trade_result = g_trade.Buy(buy_lot, _Symbol, price, 0.0, price + take_profit_points*_Point, "SelfTune BUY"); // [v3.3] Adaptive TakeProfit based on learning data
       if(trade_result)
         {
          SPatternCandidate candidate;
@@ -933,7 +968,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    else if(sell_allowed && (!buy_allowed || PositionSelect(_Symbol)==false || PositionGetInteger(POSITION_TYPE)!=POSITION_TYPE_BUY))
      {
       price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      trade_result = g_trade.Sell(sell_lot, _Symbol, price, price + stop_loss_points*_Point, price - take_profit_points*_Point, "SelfTune SELL");
+      trade_result = g_trade.Sell(sell_lot, _Symbol, price, 0.0, price - take_profit_points*_Point, "SelfTune SELL"); // [v3.3] Adaptive TakeProfit based on learning data
       if(trade_result)
         {
          SPatternCandidate candidate;
@@ -973,7 +1008,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
 //+------------------------------------------------------------------+
 //| Calculate lot size based on risk                                 |
 //+------------------------------------------------------------------+
-double CalculateLotSize(const double stop_loss_points)
+double CalculateLotSize(const double risk_points) // [v3.3] Adaptive TakeProfit based on learning data
   {
    double lot_step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1013,8 +1048,8 @@ double CalculateLotSize(const double stop_loss_points)
       point_value = tick_value / tick_size;
 
    double risk_lot = 0.0;
-   if(stop_loss_points>0.0 && point_value>0.0)
-      risk_lot = risk_amount / (stop_loss_points * _Point * point_value);
+   if(risk_points>0.0 && point_value>0.0)
+      risk_lot = risk_amount / (risk_points * _Point * point_value); // [v3.3] Adaptive TakeProfit based on learning data
 
    if(lot_step>0.0 && risk_lot>0.0)
       risk_lot = MathFloor(risk_lot/lot_step) * lot_step;
@@ -1088,52 +1123,27 @@ bool RiskChecks()
   }
 
 //+------------------------------------------------------------------+
-//| Manage open positions and trailing                               |
+//| Manage open positions and adaptive TP                             |
 //+------------------------------------------------------------------+
-void ManagePositions(const double atr_points)
+void ManagePositions(const double atr_points) // [v3.3] Adaptive TakeProfit based on learning data
   {
    if(!PositionSelect(_Symbol))
-      return;
+      return; // [v3.3] Adaptive TakeProfit based on learning data
 
-   double current_price = 0.0;
-   ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-   double stop_loss     = PositionGetDouble(POSITION_SL);
-   double take_profit   = PositionGetDouble(POSITION_TP);
-   double volume        = PositionGetDouble(POSITION_VOLUME);
-
-   double atr_for_trail = MathMax(atr_points, g_atrBuffer[0]/_Point);
-   if(atr_for_trail<=0.0)
-      return;
-   double trail_points  = atr_for_trail * (InpATRMultiplierSL/2.0);
-
-   bool update_needed = false;
-
-   if(pos_type==POSITION_TYPE_BUY)
-     {
-      current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double new_sl = current_price - trail_points*_Point;
-      if(stop_loss<new_sl)
-        {
-         stop_loss = new_sl;
-         update_needed = true;
-        }
-     }
-   else if(pos_type==POSITION_TYPE_SELL)
-     {
-      current_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double new_sl = current_price + trail_points*_Point;
-      if(stop_loss>new_sl || stop_loss==0.0)
-        {
-         stop_loss = new_sl;
-         update_needed = true;
-        }
-     }
-
-   if(update_needed)
-     {
-      if(g_trade.PositionModify(_Symbol, stop_loss, take_profit))
-         LogEvent(StringFormat("Trailing stop adjusted (%.2f lots)", volume));
-     }
+   ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE); // [v3.3] Adaptive TakeProfit based on learning data
+   double open_price = PositionGetDouble(POSITION_PRICE_OPEN); // [v3.3] Adaptive TakeProfit based on learning data
+   double current_tp = PositionGetDouble(POSITION_TP); // [v3.3] Adaptive TakeProfit based on learning data
+   int grid_levels = (pos_type==POSITION_TYPE_BUY ? g_grid.buy_levels : g_grid.sell_levels); // [v3.3] Adaptive TakeProfit based on learning data
+   int recovery_level = MathMax(0, grid_levels-1); // [v3.3] Adaptive TakeProfit based on learning data
+   double desired_points = DetermineAdaptiveTakeProfitPoints(recovery_level); // [v3.3] Adaptive TakeProfit based on learning data
+   if(atr_points>0.0)
+      desired_points = MathMax(desired_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   double desired_price = (pos_type==POSITION_TYPE_BUY) ? (open_price + desired_points*_Point)
+                                                       : (open_price - desired_points*_Point); // [v3.3] Adaptive TakeProfit based on learning data
+   if(MathAbs(current_tp - desired_price) <= _Point)
+      return; // [v3.3] Adaptive TakeProfit based on learning data
+   if(g_trade.PositionModify(_Symbol, 0.0, desired_price))
+      LogEvent(StringFormat("Adaptive TP synced (level=%d, points=%.1f)", recovery_level, desired_points)); // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 //| Manage grid positions                                            |
@@ -1153,9 +1163,6 @@ void ManageGrid(const double atr_points)
                                                           : (g_grid.base_sell_lot>0.0 ? g_grid.base_sell_lot : current_volume);
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double sl_points   = MathMax(atr_points, g_atrBuffer[0]/_Point) * InpATRMultiplierSL;
-   double tp_points   = MathMax(atr_points, g_atrBuffer[0]/_Point) * InpATRMultiplierTP;
-
    double dynamic_step_points = AdaptiveGridSpacing(MathMax(atr_points, g_atrBuffer[0]/_Point));
 
    if(last_price<=0.0)
@@ -1193,7 +1200,10 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-            if(g_trade.Buy(lot, _Symbol, current_ask, current_ask - sl_points*_Point, current_ask + tp_points*_Point, "Grid BUY"))
+         double tp_points = DetermineAdaptiveTakeProfitPoints(MathMax(0, g_grid.buy_levels)); // [v3.3] Adaptive TakeProfit based on learning data
+         if(atr_points>0.0) // [v3.3] Adaptive TakeProfit based on learning data
+            tp_points = MathMax(tp_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+         if(g_trade.Buy(lot, _Symbol, current_ask, 0.0, current_ask + tp_points*_Point, "Grid BUY")) // [v3.3] Adaptive TakeProfit based on learning data
               {
                LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", g_grid.buy_levels+1, dynamic_step_points));
                SPatternCandidate candidate = {POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.estimated_probability};
@@ -1216,7 +1226,10 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-            if(g_trade.Sell(lot, _Symbol, current_bid, current_bid + sl_points*_Point, current_bid - tp_points*_Point, "Grid SELL"))
+         double tp_points = DetermineAdaptiveTakeProfitPoints(MathMax(0, g_grid.sell_levels)); // [v3.3] Adaptive TakeProfit based on learning data
+         if(atr_points>0.0) // [v3.3] Adaptive TakeProfit based on learning data
+            tp_points = MathMax(tp_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+         if(g_trade.Sell(lot, _Symbol, current_bid, 0.0, current_bid - tp_points*_Point, "Grid SELL")) // [v3.3] Adaptive TakeProfit based on learning data
               {
                LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", g_grid.sell_levels+1, dynamic_step_points));
                SPatternCandidate candidate = {POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.estimated_probability};
@@ -1688,6 +1701,30 @@ double RecentWinRate()
    return((double)g_stats.window_wins / (double)g_stats.window_trades);
   }
 //+------------------------------------------------------------------+
+double ComputeWindowWinRate(const int window) // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   if(window<=0 || g_learningCount<=0)
+      return(0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   int sample = MathMin(window, g_learningCount); // [v3.3] Adaptive TakeProfit based on learning data
+   int start = g_learningCount - sample; // [v3.3] Adaptive TakeProfit based on learning data
+   if(start<0)
+      start = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   int wins = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   int counted = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   for(int ordinal=start; ordinal<g_learningCount; ordinal++)
+     {
+      SLearningRecord rec; // [v3.3] Adaptive TakeProfit based on learning data
+      if(!GetLearningRecord(ordinal, rec))
+         continue; // [v3.3] Adaptive TakeProfit based on learning data
+      if(rec.result>0)
+         wins++; // [v3.3] Adaptive TakeProfit based on learning data
+      counted++; // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   if(counted<=0)
+      return(0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   return((double)wins / (double)counted); // [v3.3] Adaptive TakeProfit based on learning data
+  }
+//+------------------------------------------------------------------+
 double RecentAverageProfit(const int window)
   {
    if(window<=0 || g_learningCount<=0)
@@ -1709,6 +1746,57 @@ double RecentAverageProfit(const int window)
    if(counted<=0)
       return(0.0);
    return(total / (double)counted); // [v3.1] feed adaptive learning-rate logic
+  }
+//+------------------------------------------------------------------+
+double DetermineAdaptiveTakeProfitPoints(const int recovery_level) // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   double base_points = g_takeProfitState.active_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+   int effective_level = MathMax(0, recovery_level - g_takeProfitState.active_overlap_threshold); // [v3.3] Adaptive TakeProfit based on learning data
+   double adjusted = base_points - (double)effective_level * g_takeProfitState.active_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   double floor_points = MathMax(10.0, base_points * 0.4); // [v3.3] Adaptive TakeProfit based on learning data
+   if(adjusted<floor_points)
+      adjusted = floor_points; // [v3.3] Adaptive TakeProfit based on learning data
+   return(adjusted); // [v3.3] Adaptive TakeProfit based on learning data
+  }
+//+------------------------------------------------------------------+
+void UpdateAdaptiveTakeProfitState() // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   double win_rate = ComputeWindowWinRate(100); // [v3.3] Adaptive TakeProfit based on learning data
+   double new_virtual = g_takeProfitState.base_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+   double new_reduction = g_takeProfitState.base_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   int new_overlap = g_takeProfitState.base_overlap_threshold; // [v3.3] Adaptive TakeProfit based on learning data
+   if(win_rate<0.50)
+     {
+      new_virtual = g_takeProfitState.base_virtual_points * 0.80; // [v3.3] Adaptive TakeProfit based on learning data
+      new_overlap = MathMax(0, g_takeProfitState.base_overlap_threshold - 1); // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   else if(win_rate<0.65)
+     {
+      new_virtual = g_takeProfitState.base_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+      new_reduction = g_takeProfitState.base_reduction_points * 0.7142857142857143; // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   else
+     {
+      new_virtual = g_takeProfitState.base_virtual_points * 1.10; // [v3.3] Adaptive TakeProfit based on learning data
+      new_reduction = g_takeProfitState.base_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+      new_overlap = g_takeProfitState.base_overlap_threshold; // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   new_virtual = MathMax(10.0, new_virtual); // [v3.3] Adaptive TakeProfit based on learning data
+   new_reduction = MathMax(0.0, new_reduction); // [v3.3] Adaptive TakeProfit based on learning data
+   if(new_overlap<0)
+      new_overlap = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   bool changed = (MathAbs(new_virtual - g_takeProfitState.active_virtual_points)>0.1 || // [v3.3] Adaptive TakeProfit based on learning data
+                   MathAbs(new_reduction - g_takeProfitState.active_reduction_points)>0.1 || // [v3.3] Adaptive TakeProfit based on learning data
+                   new_overlap!=g_takeProfitState.active_overlap_threshold); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_virtual_points = new_virtual; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_reduction_points = new_reduction; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_overlap_threshold = new_overlap; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.last_win_rate = win_rate; // [v3.3] Adaptive TakeProfit based on learning data
+   if(changed)
+     {
+      string message = StringFormat("Adaptive TP updated: winRate=%.2f, NewTP=%.0f", win_rate, new_virtual); // [v3.3] Adaptive TakeProfit based on learning data
+      LogEvent(message); // [v3.3] Adaptive TakeProfit based on learning data
+     }
   }
 //+------------------------------------------------------------------+
 void UpdateProbabilityModel()
@@ -1954,13 +2042,14 @@ void SelfTuneParameters()
      }
 
    //--- emit a detailed learning summary for audit trails
-   string report = StringFormat("Self-tune v3 lr=%.2f winRate=%.2f avgProfit=%.2f fastMA=%d slowMA=%d RSI(%.1f/%.1f) MFI(%.1f/%.1f) VolMult=%.2f",
-                                learningRate, win_rate, avg_profit, g_params.fast_period, g_params.slow_period,
-                                g_params.rsi_oversold, g_params.rsi_overbought,
-                                g_params.mfi_oversold, g_params.mfi_overbought,
-                                g_params.volume_multiplier);
-   LogEvent(report);
-   g_lastTuneWinRate = win_rate;      // [v3.1] refresh deviation baseline
+    string report = StringFormat("Self-tune v3 lr=%.2f winRate=%.2f avgProfit=%.2f fastMA=%d slowMA=%d RSI(%.1f/%.1f) MFI(%.1f/%.1f) VolMult=%.2f",
+                                 learningRate, win_rate, avg_profit, g_params.fast_period, g_params.slow_period,
+                                 g_params.rsi_oversold, g_params.rsi_overbought,
+                                 g_params.mfi_oversold, g_params.mfi_overbought,
+                                 g_params.volume_multiplier);
+    LogEvent(report);
+    UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
+    g_lastTuneWinRate = win_rate;      // [v3.1] refresh deviation baseline
    g_hasTuneBaseline = true;
    SaveState();
    RecreateIndicators();
@@ -2127,6 +2216,7 @@ void LoadLearningData()
 
    RecalculateRecentMetrics();
    UpdateProbabilityModel();
+   UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 void SaveLearningData()

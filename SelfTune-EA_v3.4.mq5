@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                                SelfTune-EA_v3.mq5 |
+//|                                                SelfTune-EA_v3.4.mq5 | // [v3.4] Learning-based probability system and adaptive entry
 //|                                                     SelfTune Labs |
 //|                Probability enhanced adaptive grid Expert Advisor |
 //+------------------------------------------------------------------+
 #property copyright "SelfTune Labs"
 #property link      "https://github.com/SelfTune"
-#property version   "3.00"
+#property version   "3.40" // [v3.4] Learning-based probability system and adaptive entry
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -60,6 +60,11 @@ input double            InpDailyLoss       = 5.0;            // Max daily loss b
 input double            InpATRMultiplierSL = 3.0;            // ATR multiplier for stop loss
 input double            InpATRMultiplierTP = 4.5;            // ATR multiplier for take profit
 input int               InpATRPeriod       = 14;             // ATR period
+
+sinput string sepTP="--- TakeProfit Settings ---"; // [v3.3] Adaptive TakeProfit based on learning data
+input double            InpVirtualTPDistance   = 80.0;        // Virtual take profit distance (points) // [v3.3] Adaptive TakeProfit based on learning data
+input double            InpTPReductionPerOrder = 14.0;        // TP reduction per recovery order (points) // [v3.3] Adaptive TakeProfit based on learning data
+input int               InpTPOverlapThreshold  = 2;           // Orders before TP reduction activates // [v3.3] Adaptive TakeProfit based on learning data
 
 sinput string sep2="--- Grid Control ---";
 input bool              InpUseGrid         = true;           // Enable grid module
@@ -151,6 +156,7 @@ struct SActiveTradeContext
    double               rsi;
    double               mfi;
    double               volume;
+   double               volume_ratio;      // [v3.4] Learning-based probability system and adaptive entry
    double               atr_points;
    int                  grid_level;
    double               lot_size;
@@ -160,6 +166,9 @@ struct SActiveTradeContext
    double               equity_peak;    // [v3.1] rolling peak equity during trade
    double               equity_trough;  // [v3.1] rolling trough equity during trade
    bool                 is_grid;        // [v3.1] flag grid originated trades
+   string               signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   double               win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   double               confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
   };
 
 struct SPatternCandidate
@@ -172,6 +181,7 @@ struct SPatternCandidate
    double             rsi;
    double             mfi;
    double             volume;
+   double             volume_ratio;     // [v3.4] Learning-based probability system and adaptive entry
    double             atr_points;
    int                grid_level;
    int                confirmations;
@@ -182,6 +192,9 @@ struct SPatternCandidate
    double             equity_peak;    // [v3.1] rolling equity peak seed
    double             equity_trough;  // [v3.1] rolling equity trough seed
    bool               is_grid;        // [v3.1] differentiate grid trades
+   string             signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   double             win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   double             confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
   };
 
 struct SSignalDecision
@@ -193,14 +206,32 @@ struct SSignalDecision
    double              estimated_probability;
    double              avg_win;
    double              avg_loss;
+   double              regression_probability; // [v3.4] Learning-based probability system and adaptive entry
+   double              confidence_score;       // [v3.4] Learning-based probability system and adaptive entry
+   string              signal_pattern_id;      // [v3.4] Learning-based probability system and adaptive entry
+   double              volume_ratio;           // [v3.4] Learning-based probability system and adaptive entry
+   double              ma_strength;            // [v3.4] Learning-based probability system and adaptive entry
    double              fast_ma;
    double              slow_ma;
    double              rsi;
    double              mfi;
    double              volume;
+   double              volume_avg;             // [v3.4] Learning-based probability system and adaptive entry
    double              atr_points;
    int                 confirmations_required;
    int                 pattern_mask;
+  };
+
+struct STakeProfitState
+  {
+   double   base_virtual_points;     // [v3.3] Adaptive TakeProfit based on learning data
+   double   active_virtual_points;   // [v3.3] Adaptive TakeProfit based on learning data
+   double   base_reduction_points;   // [v3.3] Adaptive TakeProfit based on learning data
+   double   active_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   int      base_overlap_threshold;  // [v3.3] Adaptive TakeProfit based on learning data
+   int      active_overlap_threshold;// [v3.3] Adaptive TakeProfit based on learning data
+   double   last_win_rate;           // [v3.3] Adaptive TakeProfit based on learning data
+   double   probability_multiplier;  // [v3.4] Learning-based probability system and adaptive entry
   };
 
 struct SLearningRecord
@@ -226,6 +257,20 @@ struct SLearningRecord
    double    duration_sec;   // [v3.1] holding duration in seconds
    double    drawdown_pct;   // [v3.1] drawdown experienced during trade
    string    trade_type;     // [v3.1] classification for AI analysis
+   string    signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   double    win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   double    confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
+  };
+
+struct SRegressionModel
+  {
+   double intercept;        // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_rsi;        // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_mfi;        // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_ma;         // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_volume;     // [v3.4] Learning-based probability system and adaptive entry
+   int    last_update_trades; // [v3.4] Learning-based probability system and adaptive entry
+   bool   initialized;      // [v3.4] Learning-based probability system and adaptive entry
   };
 
 //--- global variables -------------------------------------------------------
@@ -242,6 +287,10 @@ SPatternCandidate   g_pendingPatterns[];
 SSignalDecision     g_buyDecision;
 SSignalDecision     g_sellDecision;
 SLearningRecord     g_learningRecords[];
+STakeProfitState    g_takeProfitState; // [v3.3] Adaptive TakeProfit based on learning data
+SRegressionModel    g_regressionModel = {0.0,0.0,0.0,0.0,0.0,0,false}; // [v3.4] Learning-based probability system and adaptive entry
+double              g_lastDecisionProbability = 0.5; // [v3.4] Learning-based probability system and adaptive entry
+double              g_lastDecisionConfidence  = 0.0; // [v3.4] Learning-based probability system and adaptive entry
 int                 g_learningCount = 0;
 int                 g_learningHead  = 0;        // [v3.1] circular buffer head index
 int                 g_sinceLastTune = 0;        // [v3.1] trades since last tuning cycle
@@ -280,11 +329,15 @@ bool        RefreshIndicators();
 bool        IsNewBar();
 void        EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points);
 void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points);
-double      CalculateLotSize(const double stop_loss_points);
+double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
 bool        RiskChecks();
 void        ManagePositions(const double atr_points);
 void        ManageGrid(const double atr_points);
 void        ResetGridStateIfNeeded();
+void        InitializeAdaptiveTakeProfit(); // [v3.3] Adaptive TakeProfit based on learning data
+void        UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
+double      DetermineAdaptiveTakeProfitPoints(const int recovery_level,const double probability_hint); // [v3.4] Learning-based probability system and adaptive entry
+double      ComputeWindowWinRate(const int window); // [v3.3] Adaptive TakeProfit based on learning data
 void        LogEvent(const string message);
 void        LogIndicatorSnapshot();
 void        LogTrade(const ulong deal_ticket, const double deal_profit, const string direction);
@@ -324,6 +377,17 @@ string      CsvQuote(const string value);
 string      CsvUnquote(const string value);
 double      RecentAverageProfit(const int window);
 double      SafeCsvToDouble(const string field,bool &malformed);
+void        InitializeRegressionModel(); // [v3.4] Learning-based probability system and adaptive entry
+double      RegressionPredictProbability(const double rsi,const double mfi,const double fast_ma,const double slow_ma,const double volume_ratio); // [v3.4] Learning-based probability system and adaptive entry
+double      RegressionPredictProbability(const SLearningRecord &record); // [v3.4] Learning-based probability system and adaptive entry
+bool        UpdateRegressionModelIfNeeded(); // [v3.4] Learning-based probability system and adaptive entry
+void        RefreshLearningProbabilities(); // [v3.4] Learning-based probability system and adaptive entry
+double      ComputePatternConfidence(const ENUM_POSITION_TYPE direction,const int pattern_index); // [v3.4] Learning-based probability system and adaptive entry
+double      ComputeBlendedProbability(const ENUM_POSITION_TYPE direction,const int pattern_index,const double regression_prob); // [v3.4] Learning-based probability system and adaptive entry
+string      BuildSignalPatternID(const ENUM_POSITION_TYPE direction,const int pattern_mask); // [v3.4] Learning-based probability system and adaptive entry
+bool        ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE direction); // [v3.4] Learning-based probability system and adaptive entry
+bool        QueryPatternFromLearning(const string pattern_id,double &win_probability,double &confidence); // [v3.4] Learning-based probability system and adaptive entry
+bool        FindActiveTradeContext(const ulong position_id,SActiveTradeContext &context); // [v3.4] Learning-based probability system and adaptive entry
 
 double SafeCsvToDouble(const string field,bool &malformed)
   {
@@ -366,10 +430,14 @@ int OnInit()
      }
 
    InitializeParameters();
+   InitializeAdaptiveTakeProfit(); // [v3.3] Adaptive TakeProfit based on learning data
    InitializeFiles();
+   InitializeRegressionModel(); // [v3.4] Learning-based probability system and adaptive entry
    LoadState();
    LoadLearningData();
+   UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
    UpdateProbabilityModel();
+   RefreshLearningProbabilities(); // [v3.4] Learning-based probability system and adaptive entry
 
    g_risk.start_equity       = AccountInfoDouble(ACCOUNT_EQUITY);
    g_risk.peak_equity        = g_risk.start_equity;
@@ -603,6 +671,18 @@ void InitializeParameters()
    g_params.ma_price           = InpMAPrice;
   }
 //+------------------------------------------------------------------+
+void InitializeAdaptiveTakeProfit() // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   g_takeProfitState.base_virtual_points     = MathMax(10.0, InpVirtualTPDistance); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_virtual_points   = g_takeProfitState.base_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.base_reduction_points   = MathMax(0.0, InpTPReductionPerOrder); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_reduction_points = g_takeProfitState.base_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.base_overlap_threshold  = MathMax(0, InpTPOverlapThreshold); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_overlap_threshold= g_takeProfitState.base_overlap_threshold; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.last_win_rate           = 0.5; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.probability_multiplier  = 1.0; // [v3.4] Learning-based probability system and adaptive entry
+  }
+//+------------------------------------------------------------------+
 void InitializeFiles()
   {
    bool is_tester = (MQLInfoInteger(MQL_TESTER)==1);
@@ -659,7 +739,8 @@ void InitializeFiles()
          FileWrite(handle,
                    "TradeID","Symbol","Time","FastMA","SlowMA","RSI","MFI","Volume",
                    "Profit","WinLoss","GridLevel","ATR","SignalType","Result",
-                   "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex");
+                   "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex",
+                   "SignalPatternID","WinProbability","ConfidenceScore");
          FileClose(handle);
         }
     }
@@ -807,6 +888,17 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
    if(count>0)
       volume_avg /= count;
 
+   double volume_ratio_now = 1.0; // [v3.4] Learning-based probability system and adaptive entry
+   if(volume_avg>0.0)
+      volume_ratio_now = volume_now / MathMax(1.0, volume_avg); // [v3.4] Learning-based probability system and adaptive entry
+   volume_ratio_now = MathMax(0.1, MathMin(10.0, volume_ratio_now)); // [v3.4] Learning-based probability system and adaptive entry
+
+   double ma_strength_now = 0.0; // [v3.4] Learning-based probability system and adaptive entry
+   double ma_den = MathMax(_Point, MathAbs(slow_ma_now)); // [v3.4] Learning-based probability system and adaptive entry
+   if(ma_den>0.0)
+      ma_strength_now = (fast_ma_now - slow_ma_now) / ma_den; // [v3.4] Learning-based probability system and adaptive entry
+   ma_strength_now = MathMax(-5.0, MathMin(5.0, ma_strength_now)); // [v3.4] clamp for regression stability
+
    bool ma_bullish = (fast_ma_now>slow_ma_now) || (fast_ma_now>=slow_ma_now && fast_ma_prev>slow_ma_prev);
    bool ma_bearish = (fast_ma_now<slow_ma_now) || (fast_ma_now<=slow_ma_now && fast_ma_prev<slow_ma_prev);
 
@@ -837,6 +929,9 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
   g_buyDecision.rsi     = rsi_now;
   g_buyDecision.mfi     = mfi_now;
   g_buyDecision.volume  = volume_now;
+  g_buyDecision.volume_avg = volume_avg;            // [v3.4] Learning-based probability system and adaptive entry
+  g_buyDecision.volume_ratio = volume_ratio_now;    // [v3.4] Learning-based probability system and adaptive entry
+  g_buyDecision.ma_strength  = ma_strength_now;     // [v3.4] Learning-based probability system and adaptive entry
   g_buyDecision.atr_points = atr_points;
   g_buyDecision.confirmations_required = 3;
   for(int bi=0; bi<PATTERN_BIT_COUNT; ++bi)
@@ -847,6 +942,10 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
                                                            POSITION_TYPE_BUY, g_buyDecision.estimated_probability,
                                                            g_buyDecision.avg_win, g_buyDecision.avg_loss);
   g_buyDecision.pattern_mask = g_buyDecision.pattern_index;
+  g_buyDecision.signal_pattern_id = BuildSignalPatternID(POSITION_TYPE_BUY, g_buyDecision.pattern_index); // [v3.4] Learning-based probability system and adaptive entry
+  g_buyDecision.regression_probability = RegressionPredictProbability(g_buyDecision.rsi, g_buyDecision.mfi, g_buyDecision.fast_ma, g_buyDecision.slow_ma, g_buyDecision.volume_ratio); // [v3.4]
+  g_buyDecision.confidence_score = ComputePatternConfidence(POSITION_TYPE_BUY, g_buyDecision.pattern_index); // [v3.4]
+  g_buyDecision.estimated_probability = ComputeBlendedProbability(POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.regression_probability); // [v3.4]
   buy_signal = (g_buyDecision.confirmed>=3);
   g_buyDecision.signal = buy_signal;
 
@@ -861,6 +960,9 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
   g_sellDecision.rsi     = rsi_now;
   g_sellDecision.mfi     = mfi_now;
   g_sellDecision.volume  = volume_now;
+  g_sellDecision.volume_avg = volume_avg;           // [v3.4] Learning-based probability system and adaptive entry
+  g_sellDecision.volume_ratio = volume_ratio_now;   // [v3.4] Learning-based probability system and adaptive entry
+  g_sellDecision.ma_strength  = -ma_strength_now;   // [v3.4] mirror strength for sell context
   g_sellDecision.atr_points = atr_points;
   g_sellDecision.confirmations_required = 3;
   for(int si=0; si<PATTERN_BIT_COUNT; ++si)
@@ -871,8 +973,15 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
                                                             POSITION_TYPE_SELL, g_sellDecision.estimated_probability,
                                                             g_sellDecision.avg_win, g_sellDecision.avg_loss);
   g_sellDecision.pattern_mask = g_sellDecision.pattern_index;
+  g_sellDecision.signal_pattern_id = BuildSignalPatternID(POSITION_TYPE_SELL, g_sellDecision.pattern_index); // [v3.4] Learning-based probability system and adaptive entry
+  g_sellDecision.regression_probability = RegressionPredictProbability(g_sellDecision.rsi, g_sellDecision.mfi, g_sellDecision.fast_ma, g_sellDecision.slow_ma, g_sellDecision.volume_ratio); // [v3.4]
+  g_sellDecision.confidence_score = ComputePatternConfidence(POSITION_TYPE_SELL, g_sellDecision.pattern_index); // [v3.4]
+  g_sellDecision.estimated_probability = ComputeBlendedProbability(POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.regression_probability); // [v3.4]
   sell_signal = (g_sellDecision.confirmed>=3);
   g_sellDecision.signal = sell_signal;
+
+  g_lastDecisionProbability = MathMax(g_buyDecision.estimated_probability, g_sellDecision.estimated_probability); // [v3.4]
+  g_lastDecisionConfidence  = MathMax(g_buyDecision.confidence_score, g_sellDecision.confidence_score);          // [v3.4]
   }
 //+------------------------------------------------------------------+
 //| Execute trade signals with probability control                    |
@@ -882,21 +991,23 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    if(!buy_signal && !sell_signal)
       return;
 
-   double stop_loss_points = atr_points * InpATRMultiplierSL;
-   double take_profit_points = atr_points * InpATRMultiplierTP;
+   double probability_hint = g_lastDecisionProbability; // [v3.4] Learning-based probability system and adaptive entry
+   double take_profit_points = DetermineAdaptiveTakeProfitPoints(0, probability_hint); // [v3.4] Learning-based probability system and adaptive entry
+   double atr_floor = MathMax(atr_points * InpATRMultiplierTP, atr_points * InpATRMultiplierSL); // [v3.3] Adaptive TakeProfit based on learning data
+   double risk_points = MathMax(take_profit_points, MathMax(atr_floor, 10.0)); // [v3.3] Adaptive TakeProfit based on learning data
 
-   double base_lot = CalculateLotSize(stop_loss_points);
+   double base_lot = CalculateLotSize(risk_points); // [v3.3] Adaptive TakeProfit based on learning data
    if(base_lot<=0.0)
       return;
 
    double buy_lot = base_lot;
    double sell_lot = base_lot;
-   bool buy_allowed = buy_signal;
-   bool sell_allowed = sell_signal;
+   bool buy_allowed = (buy_signal && ConfirmPatternForEntry(g_buyDecision, POSITION_TYPE_BUY));  // [v3.4] Learning-based probability system and adaptive entry
+   bool sell_allowed = (sell_signal && ConfirmPatternForEntry(g_sellDecision, POSITION_TYPE_SELL)); // [v3.4] Learning-based probability system and adaptive entry
 
-  if(buy_signal)
+  if(buy_allowed)
      buy_allowed = PredictTradeOutcome(g_buyDecision, base_lot, buy_lot);
-  if(sell_signal)
+  if(sell_allowed)
      sell_allowed = PredictTradeOutcome(g_sellDecision, base_lot, sell_lot);
 
    double price = 0.0;
@@ -905,7 +1016,8 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    if(buy_allowed && (!sell_allowed || PositionSelect(_Symbol)==false || PositionGetInteger(POSITION_TYPE)!=POSITION_TYPE_SELL))
      {
       price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      trade_result = g_trade.Buy(buy_lot, _Symbol, price, price - stop_loss_points*_Point, price + take_profit_points*_Point, "SelfTune BUY");
+      double buy_tp_points = DetermineAdaptiveTakeProfitPoints(0, g_buyDecision.estimated_probability); // [v3.4] Learning-based probability system and adaptive entry
+      trade_result = g_trade.Buy(buy_lot, _Symbol, price, 0.0, price + buy_tp_points*_Point, "SelfTune BUY"); // [v3.4] Learning-based probability system and adaptive entry
       if(trade_result)
         {
          SPatternCandidate candidate;
@@ -917,6 +1029,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.rsi            = g_buyDecision.rsi;
          candidate.mfi            = g_buyDecision.mfi;
          candidate.volume         = g_buyDecision.volume;
+         candidate.volume_ratio   = g_buyDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
          candidate.atr_points     = g_buyDecision.atr_points;
          candidate.grid_level     = g_grid.buy_levels + 1;
          candidate.confirmations  = g_buyDecision.confirmed;
@@ -927,13 +1040,17 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.equity_peak    = candidate.equity_before;
          candidate.equity_trough  = candidate.equity_before;
          candidate.is_grid        = false;
+         candidate.signal_pattern_id = g_buyDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.win_probability   = g_buyDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.confidence_score  = g_buyDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
          PushPendingPattern(candidate);
         }
      }
    else if(sell_allowed && (!buy_allowed || PositionSelect(_Symbol)==false || PositionGetInteger(POSITION_TYPE)!=POSITION_TYPE_BUY))
      {
       price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      trade_result = g_trade.Sell(sell_lot, _Symbol, price, price + stop_loss_points*_Point, price - take_profit_points*_Point, "SelfTune SELL");
+      double sell_tp_points = DetermineAdaptiveTakeProfitPoints(0, g_sellDecision.estimated_probability); // [v3.4] Learning-based probability system and adaptive entry
+      trade_result = g_trade.Sell(sell_lot, _Symbol, price, 0.0, price - sell_tp_points*_Point, "SelfTune SELL"); // [v3.4] Learning-based probability system and adaptive entry
       if(trade_result)
         {
          SPatternCandidate candidate;
@@ -945,6 +1062,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.rsi            = g_sellDecision.rsi;
          candidate.mfi            = g_sellDecision.mfi;
          candidate.volume         = g_sellDecision.volume;
+         candidate.volume_ratio   = g_sellDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
          candidate.atr_points     = g_sellDecision.atr_points;
          candidate.grid_level     = g_grid.sell_levels + 1;
          candidate.confirmations  = g_sellDecision.confirmed;
@@ -955,6 +1073,9 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.equity_peak    = candidate.equity_before;
          candidate.equity_trough  = candidate.equity_before;
          candidate.is_grid        = false;
+         candidate.signal_pattern_id = g_sellDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.win_probability   = g_sellDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.confidence_score  = g_sellDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
          PushPendingPattern(candidate);
         }
      }
@@ -973,7 +1094,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
 //+------------------------------------------------------------------+
 //| Calculate lot size based on risk                                 |
 //+------------------------------------------------------------------+
-double CalculateLotSize(const double stop_loss_points)
+double CalculateLotSize(const double risk_points) // [v3.3] Adaptive TakeProfit based on learning data
   {
    double lot_step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1013,8 +1134,8 @@ double CalculateLotSize(const double stop_loss_points)
       point_value = tick_value / tick_size;
 
    double risk_lot = 0.0;
-   if(stop_loss_points>0.0 && point_value>0.0)
-      risk_lot = risk_amount / (stop_loss_points * _Point * point_value);
+   if(risk_points>0.0 && point_value>0.0)
+      risk_lot = risk_amount / (risk_points * _Point * point_value); // [v3.3] Adaptive TakeProfit based on learning data
 
    if(lot_step>0.0 && risk_lot>0.0)
       risk_lot = MathFloor(risk_lot/lot_step) * lot_step;
@@ -1088,52 +1209,37 @@ bool RiskChecks()
   }
 
 //+------------------------------------------------------------------+
-//| Manage open positions and trailing                               |
+//| Manage open positions and adaptive TP                             |
 //+------------------------------------------------------------------+
-void ManagePositions(const double atr_points)
+void ManagePositions(const double atr_points) // [v3.3] Adaptive TakeProfit based on learning data
   {
    if(!PositionSelect(_Symbol))
-      return;
+      return; // [v3.3] Adaptive TakeProfit based on learning data
 
-   double current_price = 0.0;
-   ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-   double stop_loss     = PositionGetDouble(POSITION_SL);
-   double take_profit   = PositionGetDouble(POSITION_TP);
-   double volume        = PositionGetDouble(POSITION_VOLUME);
-
-   double atr_for_trail = MathMax(atr_points, g_atrBuffer[0]/_Point);
-   if(atr_for_trail<=0.0)
-      return;
-   double trail_points  = atr_for_trail * (InpATRMultiplierSL/2.0);
-
-   bool update_needed = false;
-
-   if(pos_type==POSITION_TYPE_BUY)
+   ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE); // [v3.3] Adaptive TakeProfit based on learning data
+   double open_price = PositionGetDouble(POSITION_PRICE_OPEN); // [v3.3] Adaptive TakeProfit based on learning data
+   double current_tp = PositionGetDouble(POSITION_TP); // [v3.3] Adaptive TakeProfit based on learning data
+   int grid_levels = (pos_type==POSITION_TYPE_BUY ? g_grid.buy_levels : g_grid.sell_levels); // [v3.3] Adaptive TakeProfit based on learning data
+   int recovery_level = MathMax(0, grid_levels-1); // [v3.3] Adaptive TakeProfit based on learning data
+   double probability_hint = g_lastDecisionProbability; // [v3.4] Learning-based probability system and adaptive entry
+   ulong position_id = (ulong)PositionGetInteger(POSITION_TICKET); // [v3.4] Learning-based probability system and adaptive entry
+   SActiveTradeContext tracked;
+   if(position_id>0 && FindActiveTradeContext(position_id, tracked))
      {
-      current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double new_sl = current_price - trail_points*_Point;
-      if(stop_loss<new_sl)
-        {
-         stop_loss = new_sl;
-         update_needed = true;
-        }
+      if(tracked.win_probability>0.0)
+         probability_hint = tracked.win_probability;
+      else if(tracked.probability>0.0)
+         probability_hint = tracked.probability;
      }
-   else if(pos_type==POSITION_TYPE_SELL)
-     {
-      current_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double new_sl = current_price + trail_points*_Point;
-      if(stop_loss>new_sl || stop_loss==0.0)
-        {
-         stop_loss = new_sl;
-         update_needed = true;
-        }
-     }
-
-   if(update_needed)
-     {
-      if(g_trade.PositionModify(_Symbol, stop_loss, take_profit))
-         LogEvent(StringFormat("Trailing stop adjusted (%.2f lots)", volume));
-     }
+   double desired_points = DetermineAdaptiveTakeProfitPoints(recovery_level, probability_hint); // [v3.4] Learning-based probability system and adaptive entry
+   if(atr_points>0.0)
+      desired_points = MathMax(desired_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   double desired_price = (pos_type==POSITION_TYPE_BUY) ? (open_price + desired_points*_Point)
+                                                       : (open_price - desired_points*_Point); // [v3.3] Adaptive TakeProfit based on learning data
+   if(MathAbs(current_tp - desired_price) <= _Point)
+      return; // [v3.3] Adaptive TakeProfit based on learning data
+   if(g_trade.PositionModify(_Symbol, 0.0, desired_price))
+      LogEvent(StringFormat("Adaptive TP synced (level=%d, points=%.1f)", recovery_level, desired_points)); // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 //| Manage grid positions                                            |
@@ -1153,9 +1259,6 @@ void ManageGrid(const double atr_points)
                                                           : (g_grid.base_sell_lot>0.0 ? g_grid.base_sell_lot : current_volume);
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double sl_points   = MathMax(atr_points, g_atrBuffer[0]/_Point) * InpATRMultiplierSL;
-   double tp_points   = MathMax(atr_points, g_atrBuffer[0]/_Point) * InpATRMultiplierTP;
-
    double dynamic_step_points = AdaptiveGridSpacing(MathMax(atr_points, g_atrBuffer[0]/_Point));
 
    if(last_price<=0.0)
@@ -1193,15 +1296,28 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-            if(g_trade.Buy(lot, _Symbol, current_ask, current_ask - sl_points*_Point, current_ask + tp_points*_Point, "Grid BUY"))
+         double tp_points = DetermineAdaptiveTakeProfitPoints(MathMax(0, g_grid.buy_levels), g_buyDecision.estimated_probability); // [v3.4] Learning-based probability system and adaptive entry
+         if(atr_points>0.0) // [v3.3] Adaptive TakeProfit based on learning data
+            tp_points = MathMax(tp_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+         if(g_trade.Buy(lot, _Symbol, current_ask, 0.0, current_ask + tp_points*_Point, "Grid BUY")) // [v3.3] Adaptive TakeProfit based on learning data
               {
                LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", g_grid.buy_levels+1, dynamic_step_points));
                SPatternCandidate candidate = {POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.estimated_probability};
+               candidate.fast_ma       = g_buyDecision.fast_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.slow_ma       = g_buyDecision.slow_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.rsi           = g_buyDecision.rsi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.mfi           = g_buyDecision.mfi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume        = g_buyDecision.volume;       // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume_ratio  = g_buyDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.atr_points    = g_buyDecision.atr_points;   // [v3.4] Learning-based probability system and adaptive entry
                candidate.open_time      = TimeCurrent();      // [v3.1] log timing for grid trades
                candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY);
                candidate.equity_peak    = candidate.equity_before;
                candidate.equity_trough  = candidate.equity_before;
                candidate.is_grid        = true;
+               candidate.signal_pattern_id = g_buyDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.win_probability   = g_buyDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.confidence_score  = g_buyDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
                PushPendingPattern(candidate);
               }
         }
@@ -1216,15 +1332,28 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-            if(g_trade.Sell(lot, _Symbol, current_bid, current_bid + sl_points*_Point, current_bid - tp_points*_Point, "Grid SELL"))
+         double tp_points = DetermineAdaptiveTakeProfitPoints(MathMax(0, g_grid.sell_levels), g_sellDecision.estimated_probability); // [v3.4] Learning-based probability system and adaptive entry
+         if(atr_points>0.0) // [v3.3] Adaptive TakeProfit based on learning data
+            tp_points = MathMax(tp_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+         if(g_trade.Sell(lot, _Symbol, current_bid, 0.0, current_bid - tp_points*_Point, "Grid SELL")) // [v3.3] Adaptive TakeProfit based on learning data
               {
                LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", g_grid.sell_levels+1, dynamic_step_points));
                SPatternCandidate candidate = {POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.estimated_probability};
+               candidate.fast_ma       = g_sellDecision.fast_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.slow_ma       = g_sellDecision.slow_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.rsi           = g_sellDecision.rsi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.mfi           = g_sellDecision.mfi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume        = g_sellDecision.volume;       // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume_ratio  = g_sellDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.atr_points    = g_sellDecision.atr_points;   // [v3.4] Learning-based probability system and adaptive entry
                candidate.open_time      = TimeCurrent();
                candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY);
                candidate.equity_peak    = candidate.equity_before;
                candidate.equity_trough  = candidate.equity_before;
                candidate.is_grid        = true;
+               candidate.signal_pattern_id = g_sellDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.win_probability   = g_sellDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.confidence_score  = g_sellDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
                PushPendingPattern(candidate);
               }
         }
@@ -1408,6 +1537,7 @@ void RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candid
    g_activeTrades[size].rsi          = candidate.rsi;
    g_activeTrades[size].mfi          = candidate.mfi;
    g_activeTrades[size].volume       = candidate.volume;
+   g_activeTrades[size].volume_ratio = candidate.volume_ratio;      // [v3.4] Learning-based probability system and adaptive entry
    g_activeTrades[size].atr_points   = candidate.atr_points;
    g_activeTrades[size].grid_level   = candidate.grid_level;
    g_activeTrades[size].lot_size     = candidate.lot_size;
@@ -1417,6 +1547,9 @@ void RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candid
    g_activeTrades[size].equity_peak  = (candidate.equity_peak>0.0 ? candidate.equity_peak : g_activeTrades[size].equity_before);
    g_activeTrades[size].equity_trough= (candidate.equity_trough>0.0 ? candidate.equity_trough : g_activeTrades[size].equity_before);
    g_activeTrades[size].is_grid      = candidate.is_grid;
+   g_activeTrades[size].signal_pattern_id = candidate.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   g_activeTrades[size].win_probability   = candidate.win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   g_activeTrades[size].confidence_score  = candidate.confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
   }
 //+------------------------------------------------------------------+
 bool ExtractActiveTrade(const ulong position_id,SActiveTradeContext &context)
@@ -1428,6 +1561,20 @@ bool ExtractActiveTrade(const ulong position_id,SActiveTradeContext &context)
         {
          context = g_activeTrades[i];
          RemoveActiveTradeByIndex(i);
+         return(true);
+        }
+     }
+   return(false);
+  }
+//+------------------------------------------------------------------+
+bool FindActiveTradeContext(const ulong position_id,SActiveTradeContext &context)
+  {
+   int size = ArraySize(g_activeTrades);
+   for(int i=0;i<size;i++)
+     {
+      if(g_activeTrades[i].position_id==position_id)
+        {
+         context = g_activeTrades[i];
          return(true);
         }
      }
@@ -1457,7 +1604,7 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
    record.slow_ma       = context.slow_ma;
    record.rsi           = context.rsi;
    record.mfi           = context.mfi;
-   record.volume        = context.lot_size;
+   record.volume        = (context.volume_ratio>0.0 ? context.volume_ratio : context.volume); // [v3.4] Learning-based probability system and adaptive entry
    record.profit        = profit;
    record.win_loss      = (profit>=0.0 ? "Win" : "Loss");
    record.grid_level    = context.grid_level;
@@ -1480,6 +1627,9 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
    record.duration_sec  = (double)MathMax(0, (int)(deal_time - context.open_time)); // [v3.1]
    record.drawdown_pct  = drawdown_pct;              // [v3.1] store peak-to-valley drawdown
    record.trade_type    = (context.is_grid ? "Grid" : "Primary"); // [v3.1]
+   record.signal_pattern_id = context.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   record.win_probability   = (context.win_probability>0.0 ? context.win_probability : context.probability); // [v3.4] Learning-based probability system and adaptive entry
+   record.confidence_score  = context.confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
 
    AppendLearningRecord(record);
 
@@ -1521,13 +1671,15 @@ void StoreLearningRecord(const SLearningRecord &record,const bool persist)
 
    TrimLearningBuffer();
 
-   if(!persist)
-      return;
+  if(!persist)
+     return;
 
-   RecalculateRecentMetrics();
-   UpdateProbabilityModel();
-   SaveLearningData();
-   SaveState();
+  RecalculateRecentMetrics();
+  UpdateProbabilityModel();
+  UpdateRegressionModelIfNeeded();
+  RefreshLearningProbabilities();
+  SaveLearningData();
+  SaveState();
 
    if(!g_initComplete)
       return;
@@ -1674,6 +1826,274 @@ double ComputeVolumeDeviation()
    return(accum / (double)count);
   }
 //+------------------------------------------------------------------+
+void InitializeRegressionModel()
+  {
+   g_regressionModel.intercept = 0.0;            // [v3.4] Learning-based probability system and adaptive entry
+   g_regressionModel.coeff_rsi = 0.0;            // [v3.4]
+   g_regressionModel.coeff_mfi = 0.0;            // [v3.4]
+   g_regressionModel.coeff_ma  = 0.0;            // [v3.4]
+   g_regressionModel.coeff_volume = 0.0;         // [v3.4]
+   g_regressionModel.last_update_trades = 0;     // [v3.4]
+   g_regressionModel.initialized = true;         // [v3.4]
+  }
+//+------------------------------------------------------------------+
+double RegressionPredictProbability(const double rsi,const double mfi,const double fast_ma,const double slow_ma,const double volume_ratio)
+  {
+   if(!g_regressionModel.initialized)
+      InitializeRegressionModel();
+
+   double feature_rsi = (rsi - 50.0) / 50.0;                  // [v3.4]
+   double feature_mfi = (mfi - 50.0) / 50.0;                  // [v3.4]
+   double denom = MathMax(_Point, MathAbs(slow_ma));           // [v3.4]
+   double feature_ma = (denom>0.0) ? (fast_ma - slow_ma) / denom : 0.0; // [v3.4]
+   feature_ma = MathMax(-5.0, MathMin(5.0, feature_ma));      // [v3.4]
+   double ratio = (volume_ratio>0.0 ? volume_ratio : 1.0);    // [v3.4]
+   double feature_volume = MathLog(MathMax(0.1, MathMin(10.0, ratio))); // [v3.4]
+
+   double z = g_regressionModel.intercept
+              + g_regressionModel.coeff_rsi * feature_rsi
+              + g_regressionModel.coeff_mfi * feature_mfi
+              + g_regressionModel.coeff_ma  * feature_ma
+              + g_regressionModel.coeff_volume * feature_volume; // [v3.4]
+   z = MathMax(-8.0, MathMin(8.0, z));                         // [v3.4]
+   double exp_val = MathExp(-z);
+   double prob = 1.0 / (1.0 + exp_val);
+   return(MathMax(0.05, MathMin(0.95, prob)));                 // [v3.4]
+  }
+//+------------------------------------------------------------------+
+double RegressionPredictProbability(const SLearningRecord &record)
+  {
+   return(RegressionPredictProbability(record.rsi, record.mfi, record.fast_ma, record.slow_ma, (record.volume>0.0 ? record.volume : 1.0))); // [v3.4]
+  }
+//+------------------------------------------------------------------+
+bool UpdateRegressionModelIfNeeded()
+  {
+   if(g_learningCount<100)
+      return(false);
+
+   if(!g_regressionModel.initialized)
+      InitializeRegressionModel();
+
+   if(g_learningCount - g_regressionModel.last_update_trades < 20)
+      return(false);
+
+   double b0 = g_regressionModel.intercept;
+   double b1 = g_regressionModel.coeff_rsi;
+   double b2 = g_regressionModel.coeff_mfi;
+   double b3 = g_regressionModel.coeff_ma;
+   double b4 = g_regressionModel.coeff_volume;
+
+   const double alpha = 0.05;
+   const double lambda = 0.001;                                     // [v3.4] Learning-based probability system and adaptive entry
+   const double grad_clip = 5.0;                                     // [v3.4] Learning-based probability system and adaptive entry
+   const int iterations = 40;
+
+   for(int iter=0; iter<iterations; ++iter)
+     {
+      double grad0=0.0, grad1=0.0, grad2=0.0, grad3=0.0, grad4=0.0;
+      int samples = 0;
+      for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+        {
+         SLearningRecord record;
+         if(!GetLearningRecord(ordinal, record))
+            continue;
+         double feature_rsi = (record.rsi - 50.0) / 50.0;
+         double feature_mfi = (record.mfi - 50.0) / 50.0;
+         double denom = MathMax(_Point, MathAbs(record.slow_ma));
+         double feature_ma = (denom>0.0) ? (record.fast_ma - record.slow_ma) / denom : 0.0;
+         feature_ma = MathMax(-5.0, MathMin(5.0, feature_ma));
+         double ratio = (record.volume>0.0 ? record.volume : 1.0);
+         double feature_volume = MathLog(MathMax(0.1, MathMin(10.0, ratio)));
+         double z = b0 + b1*feature_rsi + b2*feature_mfi + b3*feature_ma + b4*feature_volume;
+         z = MathMax(-8.0, MathMin(8.0, z));
+         double pred = 1.0 / (1.0 + MathExp(-z));
+         double target = (record.result>0 ? 1.0 : 0.0);
+         double error = pred - target;
+         grad0 += error;
+         grad1 += error * feature_rsi;
+         grad2 += error * feature_mfi;
+         grad3 += error * feature_ma;
+         grad4 += error * feature_volume;
+         samples++;
+        }
+
+      if(samples==0)
+         break;
+
+      grad1 += lambda * b1 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+      grad2 += lambda * b2 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+      grad3 += lambda * b3 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+      grad4 += lambda * b4 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+
+      double grad_norm = MathSqrt(grad0*grad0 + grad1*grad1 + grad2*grad2 + grad3*grad3 + grad4*grad4);
+      if(grad_norm>grad_clip && grad_norm>0.0)
+        {
+         double clip_scale = grad_clip / grad_norm;                  // [v3.4] Learning-based probability system and adaptive entry
+         grad0 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad1 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad2 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad3 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad4 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+        }
+
+      double scale = alpha / (double)samples;
+      b0 -= grad0 * scale;
+      b1 -= grad1 * scale;
+      b2 -= grad2 * scale;
+      b3 -= grad3 * scale;
+      b4 -= grad4 * scale;
+     }
+
+   g_regressionModel.intercept = b0;
+   g_regressionModel.coeff_rsi = b1;
+   g_regressionModel.coeff_mfi = b2;
+   g_regressionModel.coeff_ma  = b3;
+   g_regressionModel.coeff_volume = b4;
+   g_regressionModel.last_update_trades = g_learningCount;
+   g_regressionModel.initialized = true;
+
+   double win_rate = RecentWinRate();
+   double confidence = MathMax(0.0, MathMin(1.0, g_lastDecisionConfidence));
+   LogEvent(StringFormat("Regression updated: winRate=%.2f, confidence=%.2f", win_rate, confidence)); // [v3.4]
+   return(true);
+  }
+//+------------------------------------------------------------------+
+void RefreshLearningProbabilities()
+  {
+   if(g_learningCount<=0)                                           // [v3.4] Learning-based probability system and adaptive entry
+      return;                                                       // [v3.4] Learning-based probability system and adaptive entry
+
+   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+     {
+      int idx = LearningBufferIndex(ordinal);
+      if(idx<0)
+         continue;
+      SLearningRecord record = g_learningRecords[idx];
+      ENUM_POSITION_TYPE direction = (StringFind(SafeToUpper(record.signal_type), "SELL")!=-1) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+      if(StringLen(record.signal_pattern_id)==0)
+         record.signal_pattern_id = BuildSignalPatternID(direction, record.pattern_index);
+      double regression_prob = RegressionPredictProbability(record);
+      double blended = ComputeBlendedProbability(direction, record.pattern_index, regression_prob);
+      double confidence = ComputePatternConfidence(direction, record.pattern_index);
+      if(record.confidence_score>0.0)
+         confidence = MathMax(confidence, record.confidence_score);
+      record.win_probability = blended;
+      record.confidence_score = MathMax(0.0, MathMin(1.0, confidence));
+      g_learningRecords[idx] = record;
+     }
+  }
+//+------------------------------------------------------------------+
+double ComputePatternConfidence(const ENUM_POSITION_TYPE direction,const int pattern_index)
+  {
+   int dir_index = (direction==POSITION_TYPE_SELL ? 1 : 0);
+   int bounded_index = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, pattern_index));
+   ulong trades = g_patternStats[dir_index][bounded_index].trades;
+   if(trades==0)
+      return(0.0);
+   double win_rate = g_patternModel[dir_index][bounded_index].probability;
+   double consistency = MathMin(1.0, MathAbs(win_rate - 0.5) * 2.0);
+   double sample_factor = MathMin(1.0, (double)trades / 150.0);
+   double confidence = 0.6 * sample_factor + 0.4 * consistency;
+   return(MathMax(0.0, MathMin(1.0, confidence)));
+  }
+//+------------------------------------------------------------------+
+double ComputeBlendedProbability(const ENUM_POSITION_TYPE direction,const int pattern_index,const double regression_prob)
+  {
+   int dir_index = (direction==POSITION_TYPE_SELL ? 1 : 0);
+   int bounded_index = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, pattern_index));
+   double historical_prob = g_patternModel[dir_index][bounded_index].probability;
+   if(historical_prob<=0.0)
+      historical_prob = regression_prob;
+   double model_prob = (regression_prob>0.0 ? regression_prob : historical_prob);
+   if(model_prob<=0.0)
+      model_prob = 0.5;
+   double confidence = ComputePatternConfidence(direction, bounded_index);
+   double historical_weight = MathMax(0.2, MathMin(0.8, confidence));
+   double blended = model_prob * (1.0 - historical_weight) + historical_prob * historical_weight;
+   return(MathMax(0.05, MathMin(0.95, blended)));
+  }
+//+------------------------------------------------------------------+
+string BuildSignalPatternID(const ENUM_POSITION_TYPE direction,const int pattern_mask)
+  {
+   string prefix = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+   int masked = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, pattern_mask));
+   return(StringFormat("%s-%02X", prefix, masked));
+  }
+//+------------------------------------------------------------------+
+bool QueryPatternFromLearning(const string pattern_id,double &win_probability,double &confidence)
+  {
+   win_probability = 0.0;
+   confidence = 0.0;
+   if(StringLen(pattern_id)==0)
+      return(false);
+
+   double prob_sum = 0.0;
+   double conf_sum = 0.0;
+   int matches = 0;
+   double last_prob = 0.0;
+   double last_conf = 0.0;
+   int last_pattern = 0;
+   ENUM_POSITION_TYPE last_direction = POSITION_TYPE_BUY;
+
+   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+     {
+      SLearningRecord record;
+      if(!GetLearningRecord(ordinal, record))
+         continue;
+      if(StringCompare(record.signal_pattern_id, pattern_id)!=0)
+         continue;
+      matches++;
+      double rec_prob = (record.win_probability>0.0 ? record.win_probability : (record.result>0 ? 1.0 : 0.0));
+      double rec_conf = (record.confidence_score>0.0 ? record.confidence_score : 0.0);
+      prob_sum += rec_prob;
+      conf_sum += rec_conf;
+      last_prob = rec_prob;
+      last_conf = rec_conf;
+      last_pattern = record.pattern_index;
+      last_direction = (StringFind(SafeToUpper(record.signal_type), "SELL")!=-1) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+     }
+
+   if(matches==0)
+      return(false);
+
+   win_probability = (prob_sum>0.0 ? prob_sum/(double)matches : last_prob);
+   confidence = (conf_sum>0.0 ? conf_sum/(double)matches : last_conf);
+   if(confidence<=0.0)
+      confidence = ComputePatternConfidence(last_direction, last_pattern);
+   win_probability = MathMax(0.05, MathMin(0.95, win_probability));
+   confidence = MathMax(0.0, MathMin(1.0, confidence));
+   return(true);
+  }
+//+------------------------------------------------------------------+
+bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE direction)
+  {
+   if(decision.confirmations_required>0 && decision.confirmed<decision.confirmations_required)
+      return(false);
+
+   if(g_learningCount==0)                                           // [v3.4] Learning-based probability system and adaptive entry
+      return(true);                                                 // [v3.4] Learning-based probability system and adaptive entry
+
+   double stored_probability = 0.0;
+   double stored_confidence = 0.0;
+   bool has_history = QueryPatternFromLearning(decision.signal_pattern_id, stored_probability, stored_confidence);
+   if(!has_history)
+     {
+      string dir_label = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+      LogEvent(StringFormat("Trade skipped: pattern %s (%s) not in learning cache", decision.signal_pattern_id, dir_label)); // [v3.4]
+      return(false);
+     }
+
+   decision.estimated_probability = MathMax(decision.estimated_probability, stored_probability);
+   decision.confidence_score = MathMax(decision.confidence_score, stored_confidence);
+
+   if(stored_probability>=0.60 && stored_confidence>=0.50)
+      return(true);
+
+   string dir_label2 = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+   LogEvent(StringFormat("Trade deferred: pattern %s (%s) prob=%.2f conf=%.2f", decision.signal_pattern_id, dir_label2, stored_probability, stored_confidence)); // [v3.4]
+   return(false);
+  }
+//+------------------------------------------------------------------+
 string SafeToUpper(const string value)
   {
    string tmp = value;
@@ -1686,6 +2106,30 @@ double RecentWinRate()
    if(g_stats.window_trades==0)
       return(0.5);
    return((double)g_stats.window_wins / (double)g_stats.window_trades);
+  }
+//+------------------------------------------------------------------+
+double ComputeWindowWinRate(const int window) // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   if(window<=0 || g_learningCount<=0)
+      return(0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   int sample = MathMin(window, g_learningCount); // [v3.3] Adaptive TakeProfit based on learning data
+   int start = g_learningCount - sample; // [v3.3] Adaptive TakeProfit based on learning data
+   if(start<0)
+      start = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   int wins = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   int counted = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   for(int ordinal=start; ordinal<g_learningCount; ordinal++)
+     {
+      SLearningRecord rec; // [v3.3] Adaptive TakeProfit based on learning data
+      if(!GetLearningRecord(ordinal, rec))
+         continue; // [v3.3] Adaptive TakeProfit based on learning data
+      if(rec.result>0)
+         wins++; // [v3.3] Adaptive TakeProfit based on learning data
+      counted++; // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   if(counted<=0)
+      return(0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   return((double)wins / (double)counted); // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 double RecentAverageProfit(const int window)
@@ -1709,6 +2153,69 @@ double RecentAverageProfit(const int window)
    if(counted<=0)
       return(0.0);
    return(total / (double)counted); // [v3.1] feed adaptive learning-rate logic
+  }
+//+------------------------------------------------------------------+
+double DetermineAdaptiveTakeProfitPoints(const int recovery_level,const double probability_hint) // [v3.4] Learning-based probability system and adaptive entry
+  {
+   double base_points = g_takeProfitState.active_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+   double probability = (probability_hint>0.0 ? probability_hint : g_lastDecisionProbability); // [v3.4] Learning-based probability system and adaptive entry
+   if(probability>0.0)
+     {
+      double centered = MathMax(-0.5, MathMin(0.5, probability - 0.5)); // [v3.4] clamp influence for stability
+      double probability_scale = 1.0 + centered * 0.6; // [v3.4] allow ±30% swing around base
+      base_points *= probability_scale;
+     }
+   base_points *= g_takeProfitState.probability_multiplier; // [v3.4] Learning-based probability system and adaptive entry
+   int effective_level = MathMax(0, recovery_level - g_takeProfitState.active_overlap_threshold); // [v3.3] Adaptive TakeProfit based on learning data
+   double adjusted = base_points - (double)effective_level * g_takeProfitState.active_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   double floor_points = MathMax(10.0, base_points * 0.4); // [v3.3] Adaptive TakeProfit based on learning data
+   if(adjusted<floor_points)
+      adjusted = floor_points; // [v3.3] Adaptive TakeProfit based on learning data
+   return(adjusted); // [v3.3] Adaptive TakeProfit based on learning data
+  }
+//+------------------------------------------------------------------+
+void UpdateAdaptiveTakeProfitState() // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   double win_rate = ComputeWindowWinRate(100); // [v3.3] Adaptive TakeProfit based on learning data
+   double new_virtual = g_takeProfitState.base_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+   double new_reduction = g_takeProfitState.base_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+   int new_overlap = g_takeProfitState.base_overlap_threshold; // [v3.3] Adaptive TakeProfit based on learning data
+   if(win_rate<0.50)
+     {
+      new_virtual = g_takeProfitState.base_virtual_points * 0.80; // [v3.3] Adaptive TakeProfit based on learning data
+      new_overlap = MathMax(0, g_takeProfitState.base_overlap_threshold - 1); // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   else if(win_rate<0.65)
+     {
+      new_virtual = g_takeProfitState.base_virtual_points; // [v3.3] Adaptive TakeProfit based on learning data
+      new_reduction = g_takeProfitState.base_reduction_points * 0.7142857142857143; // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   else
+     {
+      new_virtual = g_takeProfitState.base_virtual_points * 1.10; // [v3.3] Adaptive TakeProfit based on learning data
+      new_reduction = g_takeProfitState.base_reduction_points; // [v3.3] Adaptive TakeProfit based on learning data
+      new_overlap = g_takeProfitState.base_overlap_threshold; // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   new_virtual = MathMax(10.0, new_virtual); // [v3.3] Adaptive TakeProfit based on learning data
+   new_reduction = MathMax(0.0, new_reduction); // [v3.3] Adaptive TakeProfit based on learning data
+   if(new_overlap<0)
+      new_overlap = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   bool changed = (MathAbs(new_virtual - g_takeProfitState.active_virtual_points)>0.1 || // [v3.3] Adaptive TakeProfit based on learning data
+                   MathAbs(new_reduction - g_takeProfitState.active_reduction_points)>0.1 || // [v3.3] Adaptive TakeProfit based on learning data
+                   new_overlap!=g_takeProfitState.active_overlap_threshold); // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_virtual_points = new_virtual; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_reduction_points = new_reduction; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.active_overlap_threshold = new_overlap; // [v3.3] Adaptive TakeProfit based on learning data
+   g_takeProfitState.last_win_rate = win_rate; // [v3.3] Adaptive TakeProfit based on learning data
+   double confidence = MathMax(0.0, MathMin(1.0, g_lastDecisionConfidence)); // [v3.4] Learning-based probability system and adaptive entry
+   double probability_bias = MathMax(-0.5, MathMin(0.5, g_lastDecisionProbability - 0.5)); // [v3.4] Learning-based probability system and adaptive entry
+   double multiplier = 1.0 + probability_bias * (0.4 + 0.3 * confidence); // [v3.4] Learning-based probability system and adaptive entry
+   g_takeProfitState.probability_multiplier = MathMax(0.6, MathMin(1.4, multiplier)); // [v3.4] Learning-based probability system and adaptive entry
+   if(changed)
+     {
+      string message = StringFormat("Adaptive TP updated: winRate=%.2f, NewTP=%.0f", win_rate, new_virtual); // [v3.3] Adaptive TakeProfit based on learning data
+      LogEvent(message); // [v3.3] Adaptive TakeProfit based on learning data
+     }
   }
 //+------------------------------------------------------------------+
 void UpdateProbabilityModel()
@@ -1954,13 +2461,14 @@ void SelfTuneParameters()
      }
 
    //--- emit a detailed learning summary for audit trails
-   string report = StringFormat("Self-tune v3 lr=%.2f winRate=%.2f avgProfit=%.2f fastMA=%d slowMA=%d RSI(%.1f/%.1f) MFI(%.1f/%.1f) VolMult=%.2f",
-                                learningRate, win_rate, avg_profit, g_params.fast_period, g_params.slow_period,
-                                g_params.rsi_oversold, g_params.rsi_overbought,
-                                g_params.mfi_oversold, g_params.mfi_overbought,
-                                g_params.volume_multiplier);
-   LogEvent(report);
-   g_lastTuneWinRate = win_rate;      // [v3.1] refresh deviation baseline
+    string report = StringFormat("Self-tune v3 lr=%.2f winRate=%.2f avgProfit=%.2f fastMA=%d slowMA=%d RSI(%.1f/%.1f) MFI(%.1f/%.1f) VolMult=%.2f",
+                                 learningRate, win_rate, avg_profit, g_params.fast_period, g_params.slow_period,
+                                 g_params.rsi_oversold, g_params.rsi_overbought,
+                                 g_params.mfi_oversold, g_params.mfi_overbought,
+                                 g_params.volume_multiplier);
+    LogEvent(report);
+    UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
+    g_lastTuneWinRate = win_rate;      // [v3.1] refresh deviation baseline
    g_hasTuneBaseline = true;
    SaveState();
    RecreateIndicators();
@@ -1982,6 +2490,7 @@ void LoadLearningData()
 
    string header_fields[];
    bool   has_extended_columns = false;
+   bool   has_probability_columns = false; // [v3.4] Learning-based probability system and adaptive entry
    SLearningRecord record;
 
    for(int dir=0; dir<2; ++dir)
@@ -2023,8 +2532,9 @@ void LoadLearningData()
       if(StringCompare(header_fields[i], "EquityBefore")==0)
         {
          has_extended_columns = true;
-         break;
         }
+      if(StringCompare(header_fields[i], "SignalPatternID")==0)
+         has_probability_columns = true;
      }
 
    while(!FileIsEnding(handle))
@@ -2061,6 +2571,8 @@ void LoadLearningData()
         }
 
       int expected_columns = (has_extended_columns ? 20 : 15);
+      if(has_probability_columns)
+         expected_columns += 3;
       if(ArraySize(fields) < expected_columns)
          continue;
 
@@ -2117,8 +2629,27 @@ void LoadLearningData()
 
       record.pattern_index = (int)SafeCsvToDouble(fields[field_index++], malformed);
 
+      if(has_probability_columns && (field_index+2) < ArraySize(fields))
+        {
+         record.signal_pattern_id = CsvUnquote(fields[field_index++]);
+         record.win_probability   = SafeCsvToDouble(fields[field_index++], malformed);
+         record.confidence_score  = SafeCsvToDouble(fields[field_index++], malformed);
+        }
+      else
+        {
+         record.signal_pattern_id = "";
+         record.win_probability = 0.0;
+         record.confidence_score = 0.0;
+        }
+
       if(malformed)
          continue;
+
+      if(StringLen(record.signal_pattern_id)==0)
+        {
+         ENUM_POSITION_TYPE derived_dir = (StringFind(SafeToUpper(record.signal_type), "SELL")!=-1) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+         record.signal_pattern_id = BuildSignalPatternID(derived_dir, record.pattern_index);
+        }
 
       StoreLearningRecord(record, false);
      }
@@ -2127,6 +2658,9 @@ void LoadLearningData()
 
    RecalculateRecentMetrics();
    UpdateProbabilityModel();
+   UpdateRegressionModelIfNeeded();
+   RefreshLearningProbabilities();
+   UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 void SaveLearningData()
@@ -2138,7 +2672,8 @@ void SaveLearningData()
    FileWrite(handle,
              "TradeID","Symbol","Time","FastMA","SlowMA","RSI","MFI","Volume",
              "Profit","WinLoss","GridLevel","ATR","SignalType","Result",
-             "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex");
+             "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex",
+             "SignalPatternID","WinProbability","ConfidenceScore");
 
    for(int ordinal=0; ordinal<g_learningCount; ordinal++)
      {
@@ -2165,7 +2700,10 @@ void SaveLearningData()
                 record.duration_sec,
                 record.drawdown_pct,
                 CsvQuote(record.trade_type),
-                record.pattern_index);
+                record.pattern_index,
+                CsvQuote(record.signal_pattern_id),
+                record.win_probability,
+                record.confidence_score);
      }
    FileClose(handle);
   }
