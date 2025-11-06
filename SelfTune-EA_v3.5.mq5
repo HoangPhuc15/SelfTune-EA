@@ -30,6 +30,7 @@ const int     MAX_VOLUME_BUFFER      = 512;
 const int     MAX_LEARNING_RECORDS   = 700;
 const int     MIN_LEARNING_ACTIVATION= 100;
 const int     RECENT_METRIC_WINDOW   = 50;
+const int     PATTERN_LOOKBACK_WINDOW= 60;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
 enum ENUM_PATTERN_CONSTANTS
   {
@@ -1778,7 +1779,11 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
    record.trade_type    = (context.is_grid ? "Grid" : "Primary"); // [v3.1]
    record.signal_pattern_id = context.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
    record.win_probability   = (context.win_probability>0.0 ? context.win_probability : context.probability); // [v3.4] Learning-based probability system and adaptive entry
-   record.confidence_score  = context.confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
+   if(record.win_probability<=0.0) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.win_probability = (profit>=0.0 ? 0.65 : 0.45); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   record.confidence_score  = (context.confidence_score>0.0 ? context.confidence_score : ComputePatternConfidence(context.direction, context.pattern_index));  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   record.win_probability   = MathMax(0.05, MathMin(0.95, record.win_probability)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   record.confidence_score  = MathMax(0.0, MathMin(1.0, record.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
    AppendLearningRecord(record);
 
@@ -2184,15 +2189,25 @@ void RefreshLearningProbabilities()
          record.signal_pattern_id = BuildSignalPatternID(direction, record.pattern_index);
       double regression_prob = RegressionPredictProbability(record);
       double blended = ComputeBlendedProbability(direction, record.pattern_index, regression_prob);
+      double prior_prob = (record.win_probability>0.0 ? record.win_probability : (record.result>0 ? 0.65 : 0.35)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
       double confidence = ComputePatternConfidence(direction, record.pattern_index);
       double regression_conf = g_regressionModel.dynamic_confidence; // [v3.5 Update] Self-learning, cluster TP, and regression integration
-      double combined_conf = 0.6 * confidence + 0.4 * regression_conf; // [v3.5 Update] Self-learning, cluster TP, and regression integration
-      if(record.confidence_score>0.0)
-         combined_conf = MathMax(combined_conf, record.confidence_score);
-      record.win_probability = blended;
-      record.confidence_score = MathMax(0.0, MathMin(1.0, combined_conf));
+      double smoothing = MathMax(0.25, MathMin(0.75, regression_conf + 0.25)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double outcome_bias = (record.result>0 ? 0.03 : -0.03); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double target_prob = MathMax(0.05, MathMin(0.95, 0.6 * blended + 0.4 * prior_prob + outcome_bias)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.win_probability = prior_prob + (target_prob - prior_prob) * smoothing * 0.5; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.win_probability = MathMax(0.05, MathMin(0.95, record.win_probability)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+      double base_conf = (record.confidence_score>0.0 ? record.confidence_score : confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double combined_conf = 0.5 * base_conf + 0.5 * regression_conf; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(record.result>0)
+         combined_conf = MathMin(1.0, combined_conf + 0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      else
+         combined_conf = MathMax(0.0, combined_conf - 0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.confidence_score = base_conf + (combined_conf - base_conf) * smoothing; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.confidence_score = MathMax(0.0, MathMin(1.0, record.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
       g_learningRecords[idx] = record;
-     }
+    }
   }
 //+------------------------------------------------------------------+
 double ComputePatternConfidence(const ENUM_POSITION_TYPE direction,const int pattern_index)
@@ -2290,27 +2305,37 @@ bool QueryPatternFromLearning(const string pattern_id,double &win_probability,do
       return(false);
 
    double prob_sum = 0.0;
+   double weight_sum = 0.0;
    double conf_sum = 0.0;
+   double conf_weight = 0.0;
    int matches = 0;
    double last_prob = 0.0;
    double last_conf = 0.0;
    int last_pattern = 0;
    ENUM_POSITION_TYPE last_direction = POSITION_TYPE_BUY;
 
-   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+   int collected = 0;
+   for(int ordinal=g_learningCount-1; ordinal>=0 && collected<PATTERN_LOOKBACK_WINDOW; ordinal--)
      {
       SLearningRecord record;
       if(!GetLearningRecord(ordinal, record))
          continue;
       if(StringCompare(record.signal_pattern_id, pattern_id)!=0)
          continue;
+      collected++;
       matches++;
-      double rec_prob = (record.win_probability>0.0 ? record.win_probability : (record.result>0 ? 1.0 : 0.0));
-      double rec_conf = (record.confidence_score>0.0 ? record.confidence_score : 0.0);
-      prob_sum += rec_prob;
-      conf_sum += rec_conf;
+      double rec_prob = (record.win_probability>0.0 ? record.win_probability : (record.result>0 ? 0.65 : 0.35)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double rec_conf = (record.confidence_score>0.0 ? record.confidence_score : 0.0); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double weight = 1.0 + MathMax(0.0, rec_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      prob_sum += rec_prob * weight; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      weight_sum += weight; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(rec_conf>0.0)
+        {
+         conf_sum += rec_conf; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         conf_weight += 1.0; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         last_conf = rec_conf; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
       last_prob = rec_prob;
-      last_conf = rec_conf;
       last_pattern = record.pattern_index;
       last_direction = (StringFind(SafeToUpper(record.signal_type), "SELL")!=-1) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
      }
@@ -2318,12 +2343,27 @@ bool QueryPatternFromLearning(const string pattern_id,double &win_probability,do
    if(matches==0)
       return(false);
 
-   win_probability = (prob_sum>0.0 ? prob_sum/(double)matches : last_prob);
-   confidence = (conf_sum>0.0 ? conf_sum/(double)matches : last_conf);
-   if(confidence<=0.0)
-      confidence = ComputePatternConfidence(last_direction, last_pattern);
-   win_probability = MathMax(0.05, MathMin(0.95, win_probability));
-   confidence = MathMax(0.0, MathMin(1.0, confidence));
+   double avg_prob = (weight_sum>0.0 ? prob_sum/MathMax(weight_sum, 0.0001) : last_prob); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double avg_conf = (conf_weight>0.0 ? conf_sum/conf_weight : last_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(avg_conf<=0.0)
+      avg_conf = ComputePatternConfidence(last_direction, last_pattern); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   int dir_index = (last_direction==POSITION_TYPE_SELL ? 1 : 0); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int bounded_pattern = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, last_pattern)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double model_prob = g_patternModel[dir_index][bounded_pattern].probability; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(model_prob>0.0)
+      avg_prob = 0.7 * avg_prob + 0.3 * MathMax(avg_prob, model_prob); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double regression_bias = g_regressionModel.dynamic_confidence - 0.5; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(MathAbs(regression_bias)>0.0001)
+      avg_prob = MathMax(0.05, MathMin(0.95, avg_prob + regression_bias * 0.08)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double dynamic_conf = g_regressionModel.dynamic_confidence; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(dynamic_conf>0.0)
+      avg_conf = MathMax(avg_conf, 0.5*avg_conf + 0.5*dynamic_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   win_probability = MathMax(0.05, MathMin(0.95, avg_prob));
+   confidence = MathMax(0.0, MathMin(1.0, avg_conf));
    return(true);
   }
 //+------------------------------------------------------------------+
@@ -2364,7 +2404,8 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
       if(full_confirmation)
         {
          decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, bootstrap_probability), 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-         decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         double full_conf = MathMax(MathMax(decision.confidence_score, bootstrap_confidence), 0.55); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         decision.confidence_score = MathMin(1.0, full_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
          if(InpVerboseLogging)
             LogEvent(StringFormat("Full confirmation override: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
          return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
@@ -2386,6 +2427,8 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
 
    if(!partial_confirmation) // [v3.5 Update] Self-learning, cluster TP, and regression integration
      {
+      decision.estimated_probability = MathMax(decision.estimated_probability, 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      decision.confidence_score = MathMin(1.0, MathMax(decision.confidence_score, 0.55)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
       if(InpVerboseLogging)
         {
          string dir_label3 = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
