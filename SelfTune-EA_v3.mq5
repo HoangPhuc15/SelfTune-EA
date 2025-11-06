@@ -330,11 +330,11 @@ double SafeCsvToDouble(const string field,bool &malformed)
    if(malformed)
       return(0.0);
 
-   string clean = CsvUnquote(field);
+   string field_unquoted = CsvUnquote(field);
    double value = 0.0;
 
-   if(StringLen(clean)>0)
-      value = StrToDouble(clean);
+   if(StringLen(field_unquoted)>0)
+      value = StrToDouble(field_unquoted);
 
    if(!MathIsValidNumber(value))
      {
@@ -2061,10 +2061,10 @@ void LoadLearningData()
       int field_index = 0;
 
       string trade_id_field = fields[field_index++];
-      string trade_id_clean = CsvUnquote(trade_id_field);
+      string trade_id_unquoted = CsvUnquote(trade_id_field);
       double tmp_val = 0.0;
-      if(StringLen(trade_id_clean) > 0)
-         tmp_val = StrToDouble(trade_id_clean);
+      if(StringLen(trade_id_unquoted) > 0)
+         tmp_val = StrToDouble(trade_id_unquoted);
       if(!MathIsValidNumber(tmp_val) || tmp_val < 0.0)
          tmp_val = 0.0;
       record.trade_id = (ulong)MathRound(tmp_val); // [v3.1.1] Safe parse for trade_id (quoted-safe, backward compatible)
