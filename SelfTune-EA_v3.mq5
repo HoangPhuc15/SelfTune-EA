@@ -1651,9 +1651,9 @@ string SafeToUpper(const string value)
    int length = StringLen(tmp);
    for(int i=0;i<length;i++)
      {
-      ushort ch = StringGetCharacter(tmp, i);
-      ushort up = (ushort)CharToUpper(ch);
-      StringSetCharacter(tmp, i, up);
+      int ch = (int)StringGetCharacter(tmp, i);
+      int up = (int)CharToUpper(ch);
+      StringSetCharacter(tmp, i, (ushort)up);
      }
    return(tmp); // [v3.1] manual uppercase to avoid reference requirement in older toolchains
   }
@@ -1957,6 +1957,11 @@ void LoadLearningData()
    g_sinceLastTune = 0;        // [v3.1] reset tuning cadence while rebuilding cache
    g_hasTuneBaseline = false;
 
+   string header_fields[];
+   bool   has_extended_columns = false;
+   string trade_id_field = "";
+   SLearningRecord record;
+
    for(int dir=0; dir<2; ++dir)
      {
       for(int pattern=0; pattern<PATTERN_COMBINATIONS; ++pattern)
@@ -1978,7 +1983,6 @@ void LoadLearningData()
      }
 
    //--- parse header to determine column availability
-   string header_fields[];
    if(!FileIsEnding(handle))
      {
       while(true)
@@ -1992,42 +1996,40 @@ void LoadLearningData()
         }
      }
 
-  bool has_extended_columns = false;
-  for(int i=0;i<ArraySize(header_fields);i++)
-    {
-     if(StringCompare(header_fields[i], "EquityBefore")==0)
-       {
-        has_extended_columns = true;
-        break;
-       }
-    }
-
-  string trade_id_field = "";
-  while(!FileIsEnding(handle))
-    {
-     SLearningRecord record;
-     trade_id_field = FileReadString(handle);
-      if(StringLen(trade_id_field)==0)
+   for(int i=0;i<ArraySize(header_fields);i++)
+     {
+      if(StringCompare(header_fields[i], "EquityBefore")==0)
         {
-         if(FileIsEnding(handle))
-            break;
-         if(FileIsLineEnding(handle))
-            continue;
+         has_extended_columns = true;
+         break;
         }
-      record.trade_id     = (ulong)StrToDouble(trade_id_field);
-      record.symbol       = CsvUnquote(FileReadString(handle));
-      record.time         = (datetime)FileReadNumber(handle);
-      record.fast_ma      = FileReadNumber(handle);
-      record.slow_ma      = FileReadNumber(handle);
-      record.rsi          = FileReadNumber(handle);
-      record.mfi          = FileReadNumber(handle);
-      record.volume       = FileReadNumber(handle);
-      record.profit       = FileReadNumber(handle);
-      record.win_loss     = CsvUnquote(FileReadString(handle));
-      record.grid_level   = (int)FileReadNumber(handle);
-      record.atr_points   = FileReadNumber(handle);
-      record.signal_type  = CsvUnquote(FileReadString(handle));
-      record.result       = (int)FileReadNumber(handle);
+     }
+
+   while(!FileIsEnding(handle))
+     {
+      ZeroMemory(record);
+      trade_id_field = FileReadString(handle);
+       if(StringLen(trade_id_field)==0)
+         {
+          if(FileIsEnding(handle))
+             break;
+          if(FileIsLineEnding(handle))
+             continue;
+         }
+       record.trade_id     = (ulong)StrToDouble(trade_id_field);
+       record.symbol       = CsvUnquote(FileReadString(handle));
+       record.time         = (datetime)FileReadNumber(handle);
+       record.fast_ma      = FileReadNumber(handle);
+       record.slow_ma      = FileReadNumber(handle);
+       record.rsi          = FileReadNumber(handle);
+       record.mfi          = FileReadNumber(handle);
+       record.volume       = FileReadNumber(handle);
+       record.profit       = FileReadNumber(handle);
+       record.win_loss     = CsvUnquote(FileReadString(handle));
+       record.grid_level   = (int)FileReadNumber(handle);
+       record.atr_points   = FileReadNumber(handle);
+       record.signal_type  = CsvUnquote(FileReadString(handle));
+       record.result       = (int)FileReadNumber(handle);
 
       if(has_extended_columns)
         {
