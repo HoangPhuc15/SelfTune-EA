@@ -1584,6 +1584,18 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYP
    if(probability<=0.0)
       probability = 0.5;
 
+   bool fully_confirmed = (decision.confirmed>=PATTERN_BIT_COUNT);             // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(fully_confirmed)                                                         // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     {
+      adjusted_lot = base_lot;                                                 // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(probability<InpProbabilityThreshold)                                  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        {
+         string dir_label = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY"); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         LogEvent(StringFormat("Full confirmation probability override: %s pattern %s prob=%.2f conf=%.2f", dir_label, decision.signal_pattern_id, probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
+      return(true);
+     }
+
    if(probability>=InpProbabilityThreshold)
      {
       adjusted_lot = base_lot;
