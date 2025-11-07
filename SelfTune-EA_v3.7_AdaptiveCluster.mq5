@@ -340,6 +340,7 @@ bool        CreateIndicatorHandles();
 void        ReleaseIndicatorHandles();
 bool        RefreshIndicators();
 bool        IsNewBar();
+bool        IsTradeContextBusy(); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 void        EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points);
 void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points);
 double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
@@ -916,6 +917,22 @@ bool IsNewBar()
       g_lastBarTime = current_time;
       return(true);
      }
+   return(false);
+  }
+//+------------------------------------------------------------------+
+//| Check trade permissions to emulate context availability          |
+//+------------------------------------------------------------------+
+bool IsTradeContextBusy()
+  {
+   if(MQLInfoInteger(MQL_TRADE_ALLOWED)==0)
+      return(true);
+
+   if(TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)==0)
+      return(true);
+
+   if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)==0)
+      return(true);
+
    return(false);
   }
 //+------------------------------------------------------------------+
