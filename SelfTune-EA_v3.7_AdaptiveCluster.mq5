@@ -1090,6 +1090,22 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    if(base_lot<=0.0)
       return;
 
+   double min_volume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double step_volume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(min_volume<=0.0)
+      min_volume = (step_volume>0.0 ? step_volume : 0.01);
+   double enforced_base = AlignVolumeToBase(MathMax(InpBaseLot, min_volume)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+
+   bool has_symbol_position = PositionSelect(_Symbol);
+   if(!has_symbol_position && base_lot>enforced_base+0.0000001)
+     {
+      base_lot = enforced_base;
+      if(InpVerboseLogging)
+         LogEvent(StringFormat("Initial lot aligned to base minimum %.2f", base_lot));
+     }
+
+   base_lot = AlignVolumeToBase(base_lot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+
    double buy_lot = base_lot;
    double sell_lot = base_lot;
    bool buy_allowed = (buy_signal && ConfirmPatternForEntry(g_buyDecision, POSITION_TYPE_BUY));  // [v3.4] Learning-based probability system and adaptive entry
@@ -1433,11 +1449,24 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
    if(order_count<=0 || total_volume<=0.0)
       return;
 
+   double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double point_value = 0.0;
+   if(tick_value>0.0 && tick_size>0.0)
+      point_value = tick_value / tick_size;
+
+   double avg_profit_points = 0.0;
+   double avg_profit_currency = (order_count>0 ? profit_sum / (double)order_count : profit_sum);
+   if(point_value>0.0)
+      avg_profit_points = profit_sum / MathMax(0.0000001, total_volume * point_value * _Point);
+
    double avg_price = weighted_price / MathMax(total_volume, 0.0000001);
    double market_price = (direction==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                                         : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double avg_profit_points = (direction==POSITION_TYPE_BUY) ? (market_price - avg_price) / _Point
+   double price_based_points = (direction==POSITION_TYPE_BUY) ? (market_price - avg_price) / _Point
                                                              : (avg_price - market_price) / _Point;
+   if(MathAbs(avg_profit_points)<0.0001)
+      avg_profit_points = price_based_points;
 
    double cluster_probability = (probability_sum>0.0 ? probability_sum / (double)order_count : g_lastDecisionProbability);
    double cluster_confidence  = (confidence_sum>0.0 ? confidence_sum / (double)order_count : g_lastDecisionConfidence);
@@ -1455,7 +1484,15 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
       LogEvent(StringFormat("Adaptive TP adjusted: base=%.1f, winProb=%.2f, finalTP=%.1f", pre_adjust_target, cluster_probability, final_target), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    g_takeProfitState.last_cluster_target = final_target;             // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
-   if(avg_profit_points>=final_target)
+   double average_volume_per_order = total_volume / (double)order_count;
+   double target_profit_currency = 0.0;
+   if(point_value>0.0)
+      target_profit_currency = final_target * _Point * point_value * average_volume_per_order;
+
+   bool hit_point_target = (avg_profit_points>=final_target-0.0001);
+   bool hit_currency_target = (target_profit_currency>0.0 && avg_profit_currency>=target_profit_currency);
+
+   if(hit_point_target || hit_currency_target)
      {
       string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
       int indexes[];
@@ -1505,7 +1542,7 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
                LogEvent(StringFormat("Cluster close retry required: %s ticket=%I64u", dir_label, ticket), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
            }
         }
-      LogEvent(StringFormat("Cluster closed: %s closed=%d kept=%d avgPoints=%.1f target=%.1f profit=%.2f", dir_label, close_count, keep_count, avg_profit_points, final_target, profit_sum)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+      LogEvent(StringFormat("Cluster closed: %s closed=%d kept=%d avgPoints=%.1f target=%.1f avgProfit=%.2f targetProfit=%.2f total=%.2f", dir_label, close_count, keep_count, avg_profit_points, final_target, avg_profit_currency, target_profit_currency, profit_sum)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
      }
   }
 //+------------------------------------------------------------------+
@@ -1846,23 +1883,26 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYP
 //+------------------------------------------------------------------+
 double AdaptiveGridSpacing(const double atr_points)
   {
-   //--- mix volatility, indicator dispersion, and recent performance to size the grid dynamically
-   double baseline = MathMax(InpGridStepPoints, atr_points * 1.1);
-   double atr_factor = MathMax(0.8, MathMin(2.5, atr_points / MathMax(1.0, InpGridStepPoints)));
+   double baseline = MathMax(1.0, InpGridStepPoints);
+   double atr_reference = (atr_points>0.0 ? atr_points : baseline);
    double rsi_dev = ComputeRSIDeviation();
    double volume_dev = ComputeVolumeDeviation();
    double win_rate = RecentWinRate();
 
-   double performance_factor = 1.0;
-   if(win_rate<0.5)
-      performance_factor += (0.5 - win_rate) * 1.2;
-   else
-      performance_factor -= (win_rate - 0.5) * 0.8;
-   performance_factor = MathMax(0.6, MathMin(1.6, performance_factor));
+   double volatility_bias = atr_reference / baseline;
+   volatility_bias = MathMax(0.85, MathMin(1.20, volatility_bias));
 
-   double volatility_factor = 1.0 + atr_factor*0.25 + rsi_dev*0.3 + volume_dev*0.2;
-   double adaptive = baseline * performance_factor * volatility_factor;
-   adaptive = MathMax(InpGridStepPoints*0.5, MathMin(InpGridStepPoints*4.5, adaptive));
+   double performance_bias = 1.0;
+   if(win_rate>0.55)
+      performance_bias -= MathMin(0.15, (win_rate-0.55)*0.5);
+   else if(win_rate<0.45)
+      performance_bias += MathMin(0.20, (0.45-win_rate)*0.6);
+   performance_bias = MathMax(0.85, MathMin(1.20, performance_bias));
+
+   double indicator_bias = 1.0 + MathMax(-0.12, MathMin(0.12, (rsi_dev + volume_dev) * 0.25));
+
+   double adaptive = baseline * volatility_bias * performance_bias * indicator_bias;
+   adaptive = MathMax(baseline*0.8, MathMin(baseline*1.2, adaptive));
    return(adaptive);
   }
 //+------------------------------------------------------------------+
