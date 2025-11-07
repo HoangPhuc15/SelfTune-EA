@@ -341,10 +341,12 @@ void        ReleaseIndicatorHandles();
 bool        RefreshIndicators();
 bool        IsNewBar();
 bool        IsTradeContextBusy(); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+int         CountOpenPositionsByDirection(const ENUM_POSITION_TYPE direction); // [v3.7 Update] BaseLot enforcement per direction
 void        EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points);
 void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points);
 double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
 double      AlignVolumeToBase(const double volume); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+double      NormalizeGridStep(const double raw_points);                        // [v3.7 Update] Grid spacing guard
 bool        RiskChecks();
 void        ManagePositions(const double atr_points);
 void        ManageGrid(const double atr_points);
@@ -613,14 +615,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       if(deal_type==DEAL_TYPE_BUY)
         {
         if(g_grid.buy_levels==0)
-           g_grid.base_buy_lot = AlignVolumeToBase(deal_volume); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+           g_grid.base_buy_lot = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
          g_grid.buy_levels++;
          g_grid.last_buy_price = deal_price;
         }
       else if(deal_type==DEAL_TYPE_SELL)
         {
         if(g_grid.sell_levels==0)
-           g_grid.base_sell_lot = AlignVolumeToBase(deal_volume); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+           g_grid.base_sell_lot = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
          g_grid.sell_levels++;
          g_grid.last_sell_price = deal_price;
         }
@@ -936,6 +938,28 @@ bool IsTradeContextBusy()
    return(false);
   }
 //+------------------------------------------------------------------+
+//| Count open positions per direction (hedge friendly)              |
+//+------------------------------------------------------------------+
+int CountOpenPositionsByDirection(const ENUM_POSITION_TYPE direction)
+  {
+   int total = 0;
+   int total_positions = PositionsTotal();
+   for(int idx=0; idx<total_positions; idx++)
+     {
+      ulong ticket = PositionGetTicket(idx);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+         continue;
+      ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(pos_type==direction)
+         total++;
+     }
+   return(total);
+  }
+//+------------------------------------------------------------------+
 //| Evaluate core signals and probability                             |
 //+------------------------------------------------------------------+
 void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
@@ -1108,13 +1132,28 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
 
    double buy_lot = base_lot;
    double sell_lot = base_lot;
+   int open_buy_positions = CountOpenPositionsByDirection(POSITION_TYPE_BUY);
+   int open_sell_positions = CountOpenPositionsByDirection(POSITION_TYPE_SELL);
    bool buy_allowed = (buy_signal && ConfirmPatternForEntry(g_buyDecision, POSITION_TYPE_BUY));  // [v3.4] Learning-based probability system and adaptive entry
    bool sell_allowed = (sell_signal && ConfirmPatternForEntry(g_sellDecision, POSITION_TYPE_SELL)); // [v3.4] Learning-based probability system and adaptive entry
 
-  if(buy_allowed)
-     buy_allowed = PredictTradeOutcome(g_buyDecision, POSITION_TYPE_BUY, base_lot, buy_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-  if(sell_allowed)
-     sell_allowed = PredictTradeOutcome(g_sellDecision, POSITION_TYPE_SELL, base_lot, sell_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(buy_allowed)
+      buy_allowed = PredictTradeOutcome(g_buyDecision, POSITION_TYPE_BUY, base_lot, buy_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(sell_allowed)
+      sell_allowed = PredictTradeOutcome(g_sellDecision, POSITION_TYPE_SELL, base_lot, sell_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   if(buy_allowed)
+     {
+      if(open_buy_positions==0)
+         buy_lot = enforced_base;
+      buy_lot = AlignVolumeToBase(MathMax(buy_lot, enforced_base));
+     }
+   if(sell_allowed)
+     {
+      if(open_sell_positions==0)
+         sell_lot = enforced_base;
+      sell_lot = AlignVolumeToBase(MathMax(sell_lot, enforced_base));
+     }
 
    bool trade_result = false;
 
@@ -1246,6 +1285,23 @@ double AlignVolumeToBase(const double volume) // [v3.7 Update] BaseLot, Adaptive
 
    aligned = MathMax(min_lot, MathMin(max_lot, aligned)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    return(NormalizeDouble(aligned, volume_digits)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+  }
+
+double NormalizeGridStep(const double raw_points) // [v3.7 Update] Grid spacing guard
+  {
+   double baseline = MathMax(1.0, InpGridStepPoints);
+   double adjusted = raw_points;
+   if(adjusted<=0.0 || !MathIsValidNumber(adjusted))
+      adjusted = baseline;
+
+   double lower = baseline*0.9;
+   double upper = baseline*1.1;
+   adjusted = MathMax(lower, MathMin(upper, adjusted));
+
+   double rounded = MathRound(adjusted);
+   if(rounded<=0.0)
+      rounded = baseline;
+   return(MathMax(1.0, rounded));
   }
 
 double CalculateLotSize(const double risk_points) // [v3.3] Adaptive TakeProfit based on learning data
@@ -1625,10 +1681,12 @@ void ManageGrid(const double atr_points)
    double current_volume  = PositionGetDouble(POSITION_VOLUME);
    double base_lot        = (pos_type==POSITION_TYPE_BUY) ? (g_grid.base_buy_lot>0.0 ? g_grid.base_buy_lot : current_volume)
                                                           : (g_grid.base_sell_lot>0.0 ? g_grid.base_sell_lot : current_volume);
-   base_lot = AlignVolumeToBase(base_lot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+   double enforced_grid_base = AlignVolumeToBase(MathMax(InpBaseLot, 0.0));
+   base_lot = AlignVolumeToBase(MathMax(base_lot, enforced_grid_base)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double dynamic_step_points = AdaptiveGridSpacing(MathMax(atr_points, g_atrBuffer[0]/_Point));
+   dynamic_step_points = NormalizeGridStep(dynamic_step_points);
 
    if(last_price<=0.0)
      {
