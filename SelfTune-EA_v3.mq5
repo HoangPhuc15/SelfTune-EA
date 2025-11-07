@@ -31,6 +31,7 @@ const int     MAX_LEARNING_RECORDS   = 700;
 const int     MIN_LEARNING_ACTIVATION= 100;
 const int     RECENT_METRIC_WINDOW   = 50;
 const int     PATTERN_LOOKBACK_WINDOW= 60;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+const long    INT32_MAX_VALUE        = 2147483647;
 
 enum ENUM_PATTERN_CONSTANTS
   {
@@ -338,7 +339,7 @@ bool        CreateIndicatorHandles();
 void        ReleaseIndicatorHandles();
 bool        RefreshIndicators();
 bool        IsNewBar();
-bool        IsTradeContextBusy();
+bool        IsTradeContextAvailable();
 void        EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points);
 void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points);
 double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
@@ -503,7 +504,7 @@ void OnTick()
    if(g_tradeAttemptPending && (now - g_lastTradeAttemptTime) > 10)
       g_tradeAttemptPending = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
-   bool trade_context_busy = (IsTradeContextBusy() || g_tradeAttemptPending); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   bool trade_context_busy = (!IsTradeContextAvailable() || g_tradeAttemptPending); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    if(trade_context_busy)
      {
       Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
@@ -684,7 +685,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
            }
         }
 
-      int closed_trades = (int)g_stats.closed_trades;
+      long closed_trades = (long)g_stats.closed_trades;
       if(closed_trades>=MIN_LEARNING_ACTIVATION && (closed_trades % 20)==0)
          regression_updated = UpdateRegressionModelIfNeeded(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
      }
@@ -911,18 +912,18 @@ bool IsNewBar()
 //+------------------------------------------------------------------+
 //| Check trade context state                                        |
 //+------------------------------------------------------------------+
-bool IsTradeContextBusy()
+bool IsTradeContextAvailable()
   {
    if(MQLInfoInteger(MQL_TRADE_ALLOWED)==0)
-      return(true);
+      return(false);
 
    if(TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)==0)
-      return(true);
+      return(false);
 
    if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)==0)
-      return(true);
+      return(false);
 
-   return(false);
+   return(true);
   }
 //+------------------------------------------------------------------+
 //| Evaluate core signals and probability                             |
@@ -1056,7 +1057,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
       return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    datetime now = TimeCurrent(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
-   if(IsTradeContextBusy())
+   if(!IsTradeContextAvailable())
      {
       g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
       g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
@@ -1301,7 +1302,7 @@ void ManagePositions(const double atr_points) // [v3.5 Update] Self-learning, cl
   {
    if(IsStopped())
       return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
-   if(IsTradeContextBusy())
+   if(!IsTradeContextAvailable())
       return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    ManageCluster(POSITION_TYPE_BUY, atr_points);  // [v3.5 Update] Self-learning, cluster TP, and regression integration
@@ -1397,7 +1398,7 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
         {
          if(IsStopped())
             break; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
-         if(IsTradeContextBusy())
+         if(!IsTradeContextAvailable())
            {
             Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
             break;
@@ -1476,7 +1477,7 @@ void ManageGrid(const double atr_points)
       return;
 
    datetime now = TimeCurrent(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
-   if(IsTradeContextBusy())
+   if(!IsTradeContextAvailable())
      {
       g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
       g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
@@ -2151,7 +2152,7 @@ bool UpdateRegressionModelIfNeeded()
    if(!g_regressionModel.initialized)
       InitializeRegressionModel();
 
-   int closed_trades = (int)g_stats.closed_trades;
+   long closed_trades = (long)g_stats.closed_trades;
 
    if(closed_trades<MIN_LEARNING_ACTIVATION)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
@@ -2159,11 +2160,11 @@ bool UpdateRegressionModelIfNeeded()
    if((closed_trades % 20)!=0)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
-   int trades_since_update = closed_trades - g_regressionModel.last_update_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   int trades_since_update = (int)(closed_trades - (long)g_regressionModel.last_update_trades); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    if(trades_since_update < 20)
       return(false);
 
-   if(g_regressionModel.last_update_trades==closed_trades)
+   if((long)g_regressionModel.last_update_trades==closed_trades)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    double b0 = g_regressionModel.intercept;
@@ -2240,7 +2241,10 @@ bool UpdateRegressionModelIfNeeded()
    g_regressionModel.coeff_mfi = b2;
    g_regressionModel.coeff_ma  = b3;
    g_regressionModel.coeff_volume = b4;
-   g_regressionModel.last_update_trades = closed_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(closed_trades>INT32_MAX_VALUE)
+      g_regressionModel.last_update_trades = (int)INT32_MAX_VALUE; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   else
+      g_regressionModel.last_update_trades = (int)closed_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    g_regressionModel.initialized = true;
 
    double error_sum = 0.0;                                          // [v3.5 Update] Self-learning, cluster TP, and regression integration
