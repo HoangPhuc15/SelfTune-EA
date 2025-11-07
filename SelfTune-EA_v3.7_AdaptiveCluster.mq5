@@ -1205,7 +1205,8 @@ double AlignVolumeToBase(const double volume) // [v3.7 Update] BaseLot, Adaptive
    double aligned = MathMax(volume, MathMax(InpBaseLot, min_lot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    if(InpBaseLot>0.0)
      {
-      double multiple = MathMax(1.0, MathCeil((aligned + (InpBaseLot*0.0001)) / InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+      double ratio = aligned / InpBaseLot; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+      double multiple = MathMax(1.0, MathCeil(ratio - 1e-6)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
       aligned = multiple * InpBaseLot; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
      }
 
@@ -1379,14 +1380,16 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
    if(total_positions<=0)
       return; // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
-   double total_volume = 0.0;
-   double weighted_price = 0.0;
-   double probability_sum = 0.0;
-   double confidence_sum = 0.0;
-   double profit_sum = 0.0;
-   int    order_count = 0;
-   ulong  cluster_tickets[];
+   double   total_volume = 0.0;
+   double   weighted_price = 0.0;
+   double   probability_sum = 0.0;
+   double   confidence_sum = 0.0;
+   double   profit_sum = 0.0;
+   int      order_count = 0;
+   ulong    cluster_tickets[];
+   datetime cluster_open_times[];
    ArrayResize(cluster_tickets, 0);
+   ArrayResize(cluster_open_times, 0);
 
     for(int i=0;i<total_positions;i++)
       {
@@ -1412,7 +1415,9 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
        profit_sum += PositionGetDouble(POSITION_PROFIT);
 
        ArrayResize(cluster_tickets, order_count+1);
-       cluster_tickets[order_count] = ticket;
+       ArrayResize(cluster_open_times, order_count+1);
+       cluster_tickets[order_count]    = ticket;
+       cluster_open_times[order_count] = (datetime)PositionGetInteger(POSITION_TIME);
        order_count++;
 
        SActiveTradeContext context;
@@ -1453,7 +1458,35 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
    if(avg_profit_points>=final_target)
      {
       string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
-      for(int t=0;t<order_count;t++)
+      int indexes[];
+      ArrayResize(indexes, order_count);
+      for(int i=0;i<order_count;i++)
+         indexes[i] = i;
+
+      // oldest positions first so recovery overlap keeps the most recent trades
+      for(int i=0;i<order_count-1;i++)
+        {
+         for(int j=i+1;j<order_count;j++)
+           {
+            int left  = indexes[i];
+            int right = indexes[j];
+            if(cluster_open_times[left] > cluster_open_times[right])
+              {
+               int temp = indexes[i];
+               indexes[i] = indexes[j];
+               indexes[j] = temp;
+              }
+           }
+        }
+
+      int keep_count = 0;
+      if(g_takeProfitState.overlap_enabled && order_count>g_takeProfitState.overlap_threshold)
+        {
+         keep_count = MathMin(order_count-1, g_takeProfitState.overlap_threshold);
+        }
+      int close_count = order_count - keep_count;
+
+      for(int t=0;t<close_count;t++)
         {
          if(IsStopped())
             break; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
@@ -1462,26 +1495,32 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
             Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
             break;
            }
-         ulong ticket = cluster_tickets[t];
+         int index = indexes[t];
+         if(index<0 || index>=order_count)
+            continue;
+         ulong ticket = cluster_tickets[index];
          if(ticket>0)
            {
             if(!g_trade.PositionClose(ticket))
                LogEvent(StringFormat("Cluster close retry required: %s ticket=%I64u", dir_label, ticket), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
            }
         }
-      LogEvent(StringFormat("Cluster closed: %s orders=%d avgPoints=%.1f target=%.1f profit=%.2f", dir_label, order_count, avg_profit_points, final_target, profit_sum)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+      LogEvent(StringFormat("Cluster closed: %s closed=%d kept=%d avgPoints=%.1f target=%.1f profit=%.2f", dir_label, close_count, keep_count, avg_profit_points, final_target, profit_sum)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
      }
   }
 //+------------------------------------------------------------------+
 double ComputeClusterTarget(const int order_count,const double base_points,const double probability,const double confidence,const double atr_points,double &pre_adjust_target,bool &logged) // [v3.5 Update] Self-learning, cluster TP, and regression integration
   {
    double adjusted = base_points;
+   bool adjustment_flag = false;
    if(order_count>0)
      {
       int effective_orders = order_count;
       if(!g_takeProfitState.overlap_enabled && effective_orders>g_takeProfitState.overlap_threshold)
          effective_orders = g_takeProfitState.overlap_threshold;
       int reduction_index = MathMax(0, effective_orders-1);
+      if(reduction_index>0 && g_takeProfitState.dynamic_reduction_points>0.0)
+         adjustment_flag = true;
       adjusted -= g_takeProfitState.dynamic_reduction_points * reduction_index;
      }
 
@@ -1490,9 +1529,9 @@ double ComputeClusterTarget(const int order_count,const double base_points,const
       adjusted = MathMax(adjusted, atr_points*0.25);
 
    pre_adjust_target = adjusted;
-   bool adjustment_flag = false;
-   double final_target = ApplyProbabilityTargetAdjustment(adjusted, probability, confidence, adjustment_flag);
-   logged = adjustment_flag;
+   bool probability_logged = false;
+   double final_target = ApplyProbabilityTargetAdjustment(adjusted, probability, confidence, probability_logged);
+   logged = (adjustment_flag || probability_logged);
    return(MathMax(5.0, final_target));
   }
 //+------------------------------------------------------------------+
