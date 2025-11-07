@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                                SelfTune-EA_v3.mq5 |
+//|                                          SelfTune-EA_v3.6_Stable.mq5 | // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 //|                                                     SelfTune Labs |
 //|                Probability enhanced adaptive grid Expert Advisor |
 //+------------------------------------------------------------------+
 #property copyright "SelfTune Labs"
 #property link      "https://github.com/SelfTune"
-#property version   "3.00"
+#property version   "3.60" // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -30,6 +30,7 @@ const int     MAX_VOLUME_BUFFER      = 512;
 const int     MAX_LEARNING_RECORDS   = 700;
 const int     MIN_LEARNING_ACTIVATION= 100;
 const int     RECENT_METRIC_WINDOW   = 50;
+const int     PATTERN_LOOKBACK_WINDOW= 60;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
 enum ENUM_PATTERN_CONSTANTS
   {
@@ -57,9 +58,14 @@ input double            InpRiskPerTrade    = 1.0;            // Risk per trade (
 input double            InpInitialLot      = 0.0;            // Optional fixed baseline lot (0 = risk based)
 input double            InpMaxDrawdown     = 20.0;           // Max equity drawdown before halt (%)
 input double            InpDailyLoss       = 5.0;            // Max daily loss before halt (%)
-input double            InpATRMultiplierSL = 3.0;            // ATR multiplier for stop loss
 input double            InpATRMultiplierTP = 4.5;            // ATR multiplier for take profit
 input int               InpATRPeriod       = 14;             // ATR period
+
+sinput string sepTP="--- TakeProfit Settings ---"; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+input int               VirtualTPPoints     = 80;            // [v3.5 Update] Self-learning, cluster TP, and regression integration
+input int               ReduceTPPerOrder    = 14;            // [v3.5 Update] Self-learning, cluster TP, and regression integration
+input bool              AllowOverlapRecovery = true;         // [v3.5 Update] Self-learning, cluster TP, and regression integration
+input int               OverlapAfterOrders  = 3;             // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
 sinput string sep2="--- Grid Control ---";
 input bool              InpUseGrid         = true;           // Enable grid module
@@ -105,6 +111,7 @@ struct SRiskState
 struct STradeStats
   {
    ulong    total_trades;
+   ulong    closed_trades;      // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    ulong    total_wins;
    ulong    total_losses;
    ulong    window_trades;
@@ -151,6 +158,7 @@ struct SActiveTradeContext
    double               rsi;
    double               mfi;
    double               volume;
+   double               volume_ratio;      // [v3.4] Learning-based probability system and adaptive entry
    double               atr_points;
    int                  grid_level;
    double               lot_size;
@@ -160,6 +168,9 @@ struct SActiveTradeContext
    double               equity_peak;    // [v3.1] rolling peak equity during trade
    double               equity_trough;  // [v3.1] rolling trough equity during trade
    bool                 is_grid;        // [v3.1] flag grid originated trades
+   string               signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   double               win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   double               confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
   };
 
 struct SPatternCandidate
@@ -172,6 +183,7 @@ struct SPatternCandidate
    double             rsi;
    double             mfi;
    double             volume;
+   double             volume_ratio;     // [v3.4] Learning-based probability system and adaptive entry
    double             atr_points;
    int                grid_level;
    int                confirmations;
@@ -182,6 +194,9 @@ struct SPatternCandidate
    double             equity_peak;    // [v3.1] rolling equity peak seed
    double             equity_trough;  // [v3.1] rolling equity trough seed
    bool               is_grid;        // [v3.1] differentiate grid trades
+   string             signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   double             win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   double             confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
   };
 
 struct SSignalDecision
@@ -193,14 +208,34 @@ struct SSignalDecision
    double              estimated_probability;
    double              avg_win;
    double              avg_loss;
+   double              regression_probability; // [v3.4] Learning-based probability system and adaptive entry
+   double              confidence_score;       // [v3.4] Learning-based probability system and adaptive entry
+   string              signal_pattern_id;      // [v3.4] Learning-based probability system and adaptive entry
+   double              volume_ratio;           // [v3.4] Learning-based probability system and adaptive entry
+   double              ma_strength;            // [v3.4] Learning-based probability system and adaptive entry
    double              fast_ma;
    double              slow_ma;
    double              rsi;
    double              mfi;
    double              volume;
+   double              volume_avg;             // [v3.4] Learning-based probability system and adaptive entry
    double              atr_points;
    int                 confirmations_required;
    int                 pattern_mask;
+  };
+
+struct STakeProfitState
+  {
+   double   base_virtual_points;     // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double   base_reduction_points;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double   dynamic_virtual_points;  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double   dynamic_reduction_points;// [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int      overlap_threshold;       // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   bool     overlap_enabled;         // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double   last_win_rate;           // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double   probability_multiplier;  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double   last_probability;        // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double   last_cluster_target;     // [v3.5 Update] Self-learning, cluster TP, and regression integration
   };
 
 struct SLearningRecord
@@ -226,6 +261,23 @@ struct SLearningRecord
    double    duration_sec;   // [v3.1] holding duration in seconds
    double    drawdown_pct;   // [v3.1] drawdown experienced during trade
    string    trade_type;     // [v3.1] classification for AI analysis
+   string    signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   double    win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   double    confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
+  };
+
+struct SRegressionModel
+  {
+   double intercept;        // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_rsi;        // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_mfi;        // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_ma;         // [v3.4] Learning-based probability system and adaptive entry
+   double coeff_volume;     // [v3.4] Learning-based probability system and adaptive entry
+   int    last_update_trades; // [v3.4] Learning-based probability system and adaptive entry
+   bool   initialized;      // [v3.4] Learning-based probability system and adaptive entry
+   double error_variance;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double dynamic_confidence; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int    sample_size;      // [v3.5 Update] Self-learning, cluster TP, and regression integration
   };
 
 //--- global variables -------------------------------------------------------
@@ -242,6 +294,10 @@ SPatternCandidate   g_pendingPatterns[];
 SSignalDecision     g_buyDecision;
 SSignalDecision     g_sellDecision;
 SLearningRecord     g_learningRecords[];
+STakeProfitState    g_takeProfitState; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+SRegressionModel    g_regressionModel = {0.0,0.0,0.0,0.0,0.0,0,false,0.0,0.0,0}; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+double              g_lastDecisionProbability = 0.5; // [v3.4] Learning-based probability system and adaptive entry
+double              g_lastDecisionConfidence  = 0.0; // [v3.4] Learning-based probability system and adaptive entry
 int                 g_learningCount = 0;
 int                 g_learningHead  = 0;        // [v3.1] circular buffer head index
 int                 g_sinceLastTune = 0;        // [v3.1] trades since last tuning cycle
@@ -250,6 +306,10 @@ bool                g_hasTuneBaseline = false;  // [v3.1] guard for deviation-tr
 double              g_recentRSI[];
 double              g_recentVolume[];
 bool                g_initComplete = false;     // [v3.1] block tuning during initialization
+
+datetime           g_lastTradeAttemptTime = 0;  // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+datetime           g_lastGridAttemptTime  = 0;  // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+bool               g_tradeAttemptPending  = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
 int g_fastMAHandle = INVALID_HANDLE;
 int g_slowMAHandle = INVALID_HANDLE;
@@ -280,12 +340,19 @@ bool        RefreshIndicators();
 bool        IsNewBar();
 void        EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points);
 void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points);
-double      CalculateLotSize(const double stop_loss_points);
+double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
 bool        RiskChecks();
 void        ManagePositions(const double atr_points);
 void        ManageGrid(const double atr_points);
 void        ResetGridStateIfNeeded();
-void        LogEvent(const string message);
+void        InitializeAdaptiveTakeProfit(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+void        UpdateAdaptiveTakeProfitState(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+double      DetermineAdaptiveTakeProfitPoints(const int recovery_level,const double probability_hint); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+void        ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+double      ComputeClusterTarget(const int order_count,const double base_points,const double probability,const double confidence,const double atr_points,double &pre_adjust_target,bool &logged); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+double      ApplyProbabilityTargetAdjustment(const double base_target,const double probability,const double confidence,bool &logged); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+double      ComputeWindowWinRate(const int window); // [v3.3] Adaptive TakeProfit based on learning data
+void        LogEvent(const string message,const bool essential=false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 void        LogIndicatorSnapshot();
 void        LogTrade(const ulong deal_ticket, const double deal_profit, const string direction);
 void        LoadState();
@@ -301,7 +368,7 @@ int         PatternIndexFromConditions(const bool cond_ma,const bool cond_rsi,co
 int         EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool cond_mfi,const bool cond_vol,
                                        const ENUM_POSITION_TYPE direction,double &probability,double &avg_profit,
                                        double &avg_loss);
-bool        PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,double &adjusted_lot);
+bool        PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction,const double base_lot,double &adjusted_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 double      AdaptiveGridSpacing(const double atr_points);
 void        PushPendingPattern(const SPatternCandidate &candidate);
 bool        PopPendingPattern(const ENUM_POSITION_TYPE direction,SPatternCandidate &candidate);
@@ -324,6 +391,19 @@ string      CsvQuote(const string value);
 string      CsvUnquote(const string value);
 double      RecentAverageProfit(const int window);
 double      SafeCsvToDouble(const string field,bool &malformed);
+void        InitializeRegressionModel(); // [v3.4] Learning-based probability system and adaptive entry
+double      RegressionPredictProbability(const double rsi,const double mfi,const double fast_ma,const double slow_ma,const double volume_ratio); // [v3.4] Learning-based probability system and adaptive entry
+double      RegressionPredictProbability(const SLearningRecord &record); // [v3.4] Learning-based probability system and adaptive entry
+bool        UpdateRegressionModelIfNeeded(); // [v3.4] Learning-based probability system and adaptive entry
+void        RefreshLearningProbabilities(); // [v3.4] Learning-based probability system and adaptive entry
+double      ComputePatternConfidence(const ENUM_POSITION_TYPE direction,const int pattern_index); // [v3.4] Learning-based probability system and adaptive entry
+double      ComputeBlendedProbability(const ENUM_POSITION_TYPE direction,const int pattern_index,const double regression_prob); // [v3.4] Learning-based probability system and adaptive entry
+string      BuildSignalPatternID(const ENUM_POSITION_TYPE direction,const int pattern_mask); // [v3.4] Learning-based probability system and adaptive entry
+bool        ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE direction); // [v3.4] Learning-based probability system and adaptive entry
+double      EstimateBootstrapProbability(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+double      EstimateBootstrapConfidence(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+bool        QueryPatternFromLearning(const string pattern_id,double &win_probability,double &confidence); // [v3.4] Learning-based probability system and adaptive entry
+bool        FindActiveTradeContext(const ulong position_id,SActiveTradeContext &context); // [v3.4] Learning-based probability system and adaptive entry
 
 double SafeCsvToDouble(const string field,bool &malformed)
   {
@@ -366,10 +446,14 @@ int OnInit()
      }
 
    InitializeParameters();
+   InitializeAdaptiveTakeProfit(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
    InitializeFiles();
+   InitializeRegressionModel(); // [v3.4] Learning-based probability system and adaptive entry
    LoadState();
    LoadLearningData();
+   UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
    UpdateProbabilityModel();
+   RefreshLearningProbabilities(); // [v3.4] Learning-based probability system and adaptive entry
 
    g_risk.start_equity       = AccountInfoDouble(ACCOUNT_EQUITY);
    g_risk.peak_equity        = g_risk.start_equity;
@@ -385,7 +469,7 @@ int OnInit()
    MathSrand((uint)TimeLocal());
    g_trade.SetExpertMagicNumber((uint)MathRand());
 
-   LogEvent("EA initialized");
+   LogEvent("EA initialized", true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    g_initComplete = true; // [v3.1] enable post-init learning cycles
    return(INIT_SUCCEEDED);
   }
@@ -398,18 +482,32 @@ void OnDeinit(const int reason)
    SaveState();
    SaveLearningData();
    ReleaseIndicatorHandles();
-   LogEvent(StringFormat("EA deinitialized (%d)",reason));
+   LogEvent(StringFormat("EA deinitialized (%d)",reason), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
   }
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
    bool trading_allowed = RiskChecks();
    double atr_points = (g_atrBuffer[0]>0.0 ? g_atrBuffer[0]/_Point : 0.0);
    bool buy_signal=false, sell_signal=false;
 
    UpdateActiveTradeExtents(); // [v3.1] refresh equity peaks/troughs for open trades
+
+   datetime now = TimeCurrent(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(g_tradeAttemptPending && (now - g_lastTradeAttemptTime) > 10)
+      g_tradeAttemptPending = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   bool trade_context_busy = (IsTradeContextBusy() || g_tradeAttemptPending); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(trade_context_busy)
+     {
+      Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      trading_allowed = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+     }
 
    if(IsNewBar())
      {
@@ -432,11 +530,13 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
   {
-   if(trans.deal==0 || trans.symbol!=_Symbol)
+  if(trans.deal==0 || trans.symbol!=_Symbol)
       return;
 
-   if(trans.type!=TRADE_TRANSACTION_DEAL_ADD && trans.type!=TRADE_TRANSACTION_DEAL_UPDATE)
+  if(trans.type!=TRADE_TRANSACTION_DEAL_ADD && trans.type!=TRADE_TRANSACTION_DEAL_UPDATE)
       return;
+
+   g_tradeAttemptPending = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    ENUM_DEAL_ENTRY entry_type = DEAL_ENTRY_IN;
    ENUM_DEAL_TYPE  deal_type  = DEAL_TYPE_BUY;
@@ -491,6 +591,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
    bool entry_is_in  = (entry_type==DEAL_ENTRY_IN || entry_type==DEAL_ENTRY_IN_BY);
    bool entry_is_out = (entry_type==DEAL_ENTRY_OUT || entry_type==DEAL_ENTRY_OUT_BY);
 
+   bool regression_updated = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
    if(entry_is_in)
      {
       g_stats.total_trades++;
@@ -528,6 +630,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
 
    if(entry_is_out)
      {
+      g_stats.closed_trades++; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
       bool closing_buy = (deal_type==DEAL_TYPE_SELL);
       ENUM_POSITION_TYPE original_direction = closing_buy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
       string direction = closing_buy ? "CLOSE_BUY" : "CLOSE_SELL";
@@ -576,12 +679,21 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          if(g_grid.sell_levels==0)
            {
             g_grid.last_sell_price = 0.0;
-            g_grid.base_sell_lot   = 0.0;
+           g_grid.base_sell_lot   = 0.0;
            }
         }
+
+      if(g_stats.closed_trades>=MIN_LEARNING_ACTIVATION && (g_stats.closed_trades % 20)==0)
+         regression_updated = UpdateRegressionModelIfNeeded(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
      }
 
    ResetGridStateIfNeeded();
+   if(regression_updated) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     {
+      RefreshLearningProbabilities(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      SaveLearningData(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      UpdateAdaptiveTakeProfitState(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -601,6 +713,20 @@ void InitializeParameters()
    g_params.volume_multiplier  = MathMax(0.5, InpVolumeMultiplier);
    g_params.ma_method          = InpMAType;
    g_params.ma_price           = InpMAPrice;
+  }
+//+------------------------------------------------------------------+
+void InitializeAdaptiveTakeProfit() // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   g_takeProfitState.base_virtual_points      = MathMax(10.0, (double)VirtualTPPoints);   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.base_reduction_points    = MathMax(0.0, (double)ReduceTPPerOrder);   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.dynamic_virtual_points   = g_takeProfitState.base_virtual_points;    // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.dynamic_reduction_points = g_takeProfitState.base_reduction_points;  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.overlap_threshold        = MathMax(1, OverlapAfterOrders);           // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.overlap_enabled          = AllowOverlapRecovery;                     // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.last_win_rate            = 0.5;                                       // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.probability_multiplier   = 1.0;                                       // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.last_probability         = 0.5;                                       // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_takeProfitState.last_cluster_target      = g_takeProfitState.base_virtual_points;     // [v3.5 Update] Self-learning, cluster TP, and regression integration
   }
 //+------------------------------------------------------------------+
 void InitializeFiles()
@@ -641,7 +767,7 @@ void InitializeFiles()
                    "FastMA","SlowMA","RSIPeriod","RSI_Overbought","RSI_Oversold",
                    "MFIPeriod","MFI_Overbought","MFI_Oversold",
                    "VolumePeriod","VolumeMultiplier",
-                   "TotalTrades","TotalWins","TotalLosses","TotalProfit");
+                   "TotalTrades","ClosedTrades","TotalWins","TotalLosses","TotalProfit"); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
          FileClose(handle);
         }
      }
@@ -659,7 +785,8 @@ void InitializeFiles()
          FileWrite(handle,
                    "TradeID","Symbol","Time","FastMA","SlowMA","RSI","MFI","Volume",
                    "Profit","WinLoss","GridLevel","ATR","SignalType","Result",
-                   "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex");
+                   "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex",
+                   "SignalPatternID","WinProbability","ConfidenceScore");
          FileClose(handle);
         }
     }
@@ -807,6 +934,17 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
    if(count>0)
       volume_avg /= count;
 
+   double volume_ratio_now = 1.0; // [v3.4] Learning-based probability system and adaptive entry
+   if(volume_avg>0.0)
+      volume_ratio_now = volume_now / MathMax(1.0, volume_avg); // [v3.4] Learning-based probability system and adaptive entry
+   volume_ratio_now = MathMax(0.1, MathMin(10.0, volume_ratio_now)); // [v3.4] Learning-based probability system and adaptive entry
+
+   double ma_strength_now = 0.0; // [v3.4] Learning-based probability system and adaptive entry
+   double ma_den = MathMax(_Point, MathAbs(slow_ma_now)); // [v3.4] Learning-based probability system and adaptive entry
+   if(ma_den>0.0)
+      ma_strength_now = (fast_ma_now - slow_ma_now) / ma_den; // [v3.4] Learning-based probability system and adaptive entry
+   ma_strength_now = MathMax(-5.0, MathMin(5.0, ma_strength_now)); // [v3.4] clamp for regression stability
+
    bool ma_bullish = (fast_ma_now>slow_ma_now) || (fast_ma_now>=slow_ma_now && fast_ma_prev>slow_ma_prev);
    bool ma_bearish = (fast_ma_now<slow_ma_now) || (fast_ma_now<=slow_ma_now && fast_ma_prev<slow_ma_prev);
 
@@ -837,6 +975,9 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
   g_buyDecision.rsi     = rsi_now;
   g_buyDecision.mfi     = mfi_now;
   g_buyDecision.volume  = volume_now;
+  g_buyDecision.volume_avg = volume_avg;            // [v3.4] Learning-based probability system and adaptive entry
+  g_buyDecision.volume_ratio = volume_ratio_now;    // [v3.4] Learning-based probability system and adaptive entry
+  g_buyDecision.ma_strength  = ma_strength_now;     // [v3.4] Learning-based probability system and adaptive entry
   g_buyDecision.atr_points = atr_points;
   g_buyDecision.confirmations_required = 3;
   for(int bi=0; bi<PATTERN_BIT_COUNT; ++bi)
@@ -847,6 +988,10 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
                                                            POSITION_TYPE_BUY, g_buyDecision.estimated_probability,
                                                            g_buyDecision.avg_win, g_buyDecision.avg_loss);
   g_buyDecision.pattern_mask = g_buyDecision.pattern_index;
+  g_buyDecision.signal_pattern_id = BuildSignalPatternID(POSITION_TYPE_BUY, g_buyDecision.pattern_index); // [v3.4] Learning-based probability system and adaptive entry
+  g_buyDecision.regression_probability = RegressionPredictProbability(g_buyDecision.rsi, g_buyDecision.mfi, g_buyDecision.fast_ma, g_buyDecision.slow_ma, g_buyDecision.volume_ratio); // [v3.4]
+  g_buyDecision.confidence_score = ComputePatternConfidence(POSITION_TYPE_BUY, g_buyDecision.pattern_index); // [v3.4]
+  g_buyDecision.estimated_probability = ComputeBlendedProbability(POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.regression_probability); // [v3.4]
   buy_signal = (g_buyDecision.confirmed>=3);
   g_buyDecision.signal = buy_signal;
 
@@ -861,6 +1006,9 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
   g_sellDecision.rsi     = rsi_now;
   g_sellDecision.mfi     = mfi_now;
   g_sellDecision.volume  = volume_now;
+  g_sellDecision.volume_avg = volume_avg;           // [v3.4] Learning-based probability system and adaptive entry
+  g_sellDecision.volume_ratio = volume_ratio_now;   // [v3.4] Learning-based probability system and adaptive entry
+  g_sellDecision.ma_strength  = -ma_strength_now;   // [v3.4] mirror strength for sell context
   g_sellDecision.atr_points = atr_points;
   g_sellDecision.confirmations_required = 3;
   for(int si=0; si<PATTERN_BIT_COUNT; ++si)
@@ -871,41 +1019,65 @@ void EvaluateSignals(bool &buy_signal, bool &sell_signal, double &atr_points)
                                                             POSITION_TYPE_SELL, g_sellDecision.estimated_probability,
                                                             g_sellDecision.avg_win, g_sellDecision.avg_loss);
   g_sellDecision.pattern_mask = g_sellDecision.pattern_index;
+  g_sellDecision.signal_pattern_id = BuildSignalPatternID(POSITION_TYPE_SELL, g_sellDecision.pattern_index); // [v3.4] Learning-based probability system and adaptive entry
+  g_sellDecision.regression_probability = RegressionPredictProbability(g_sellDecision.rsi, g_sellDecision.mfi, g_sellDecision.fast_ma, g_sellDecision.slow_ma, g_sellDecision.volume_ratio); // [v3.4]
+  g_sellDecision.confidence_score = ComputePatternConfidence(POSITION_TYPE_SELL, g_sellDecision.pattern_index); // [v3.4]
+  g_sellDecision.estimated_probability = ComputeBlendedProbability(POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.regression_probability); // [v3.4]
   sell_signal = (g_sellDecision.confirmed>=3);
   g_sellDecision.signal = sell_signal;
+
+  g_lastDecisionProbability = MathMax(g_buyDecision.estimated_probability, g_sellDecision.estimated_probability); // [v3.4]
+  g_lastDecisionConfidence  = MathMax(g_buyDecision.confidence_score, g_sellDecision.confidence_score);          // [v3.4]
   }
 //+------------------------------------------------------------------+
 //| Execute trade signals with probability control                    |
 //+------------------------------------------------------------------+
 void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double atr_points)
   {
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   datetime now = TimeCurrent(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(IsTradeContextBusy())
+     {
+      g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      return;
+     }
+
+   if(g_tradeAttemptPending && (now - g_lastTradeAttemptTime) < 2)
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
    if(!buy_signal && !sell_signal)
       return;
 
-   double stop_loss_points = atr_points * InpATRMultiplierSL;
-   double take_profit_points = atr_points * InpATRMultiplierTP;
+   double probability_hint = g_lastDecisionProbability; // [v3.4] Learning-based probability system and adaptive entry
+   double take_profit_points = DetermineAdaptiveTakeProfitPoints(0, probability_hint); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double atr_floor = atr_points * InpATRMultiplierTP; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double risk_points = MathMax(take_profit_points, MathMax(atr_floor, 10.0)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
-   double base_lot = CalculateLotSize(stop_loss_points);
+   double base_lot = CalculateLotSize(risk_points); // [v3.3] Adaptive TakeProfit based on learning data
    if(base_lot<=0.0)
       return;
 
    double buy_lot = base_lot;
    double sell_lot = base_lot;
-   bool buy_allowed = buy_signal;
-   bool sell_allowed = sell_signal;
+   bool buy_allowed = (buy_signal && ConfirmPatternForEntry(g_buyDecision, POSITION_TYPE_BUY));  // [v3.4] Learning-based probability system and adaptive entry
+   bool sell_allowed = (sell_signal && ConfirmPatternForEntry(g_sellDecision, POSITION_TYPE_SELL)); // [v3.4] Learning-based probability system and adaptive entry
 
-  if(buy_signal)
-     buy_allowed = PredictTradeOutcome(g_buyDecision, base_lot, buy_lot);
-  if(sell_signal)
-     sell_allowed = PredictTradeOutcome(g_sellDecision, base_lot, sell_lot);
+  if(buy_allowed)
+     buy_allowed = PredictTradeOutcome(g_buyDecision, POSITION_TYPE_BUY, base_lot, buy_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  if(sell_allowed)
+     sell_allowed = PredictTradeOutcome(g_sellDecision, POSITION_TYPE_SELL, base_lot, sell_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
-   double price = 0.0;
    bool trade_result = false;
 
    if(buy_allowed && (!sell_allowed || PositionSelect(_Symbol)==false || PositionGetInteger(POSITION_TYPE)!=POSITION_TYPE_SELL))
      {
-      price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      trade_result = g_trade.Buy(buy_lot, _Symbol, price, price - stop_loss_points*_Point, price + take_profit_points*_Point, "SelfTune BUY");
+      g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      trade_result = g_trade.Buy(buy_lot, _Symbol, 0.0, 0.0, 0.0, "SelfTune BUY"); // [v3.5 Update] Self-learning, cluster TP, and regression integration
       if(trade_result)
         {
          SPatternCandidate candidate;
@@ -917,7 +1089,8 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.rsi            = g_buyDecision.rsi;
          candidate.mfi            = g_buyDecision.mfi;
          candidate.volume         = g_buyDecision.volume;
-         candidate.atr_points     = g_buyDecision.atr_points;
+         candidate.volume_ratio   = g_buyDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.atr_points     = g_buyDecision.atr_points;      // [v3.5 Update] Self-learning, cluster TP, and regression integration
          candidate.grid_level     = g_grid.buy_levels + 1;
          candidate.confirmations  = g_buyDecision.confirmed;
          candidate.lot_size       = buy_lot;
@@ -927,13 +1100,21 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.equity_peak    = candidate.equity_before;
          candidate.equity_trough  = candidate.equity_before;
          candidate.is_grid        = false;
+         candidate.signal_pattern_id = g_buyDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.win_probability   = g_buyDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.confidence_score  = g_buyDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
          PushPendingPattern(candidate);
+        }
+      else
+        {
+         g_tradeAttemptPending = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
         }
      }
    else if(sell_allowed && (!buy_allowed || PositionSelect(_Symbol)==false || PositionGetInteger(POSITION_TYPE)!=POSITION_TYPE_BUY))
      {
-      price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      trade_result = g_trade.Sell(sell_lot, _Symbol, price, price + stop_loss_points*_Point, price - take_profit_points*_Point, "SelfTune SELL");
+      g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      trade_result = g_trade.Sell(sell_lot, _Symbol, 0.0, 0.0, 0.0, "SelfTune SELL"); // [v3.5 Update] Self-learning, cluster TP, and regression integration
       if(trade_result)
         {
          SPatternCandidate candidate;
@@ -945,7 +1126,8 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.rsi            = g_sellDecision.rsi;
          candidate.mfi            = g_sellDecision.mfi;
          candidate.volume         = g_sellDecision.volume;
-         candidate.atr_points     = g_sellDecision.atr_points;
+         candidate.volume_ratio   = g_sellDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.atr_points     = g_sellDecision.atr_points;     // [v3.5 Update] Self-learning, cluster TP, and regression integration
          candidate.grid_level     = g_grid.sell_levels + 1;
          candidate.confirmations  = g_sellDecision.confirmed;
          candidate.lot_size       = sell_lot;
@@ -955,7 +1137,14 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
          candidate.equity_peak    = candidate.equity_before;
          candidate.equity_trough  = candidate.equity_before;
          candidate.is_grid        = false;
+         candidate.signal_pattern_id = g_sellDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.win_probability   = g_sellDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+         candidate.confidence_score  = g_sellDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
          PushPendingPattern(candidate);
+        }
+      else
+        {
+         g_tradeAttemptPending = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
         }
      }
 
@@ -963,17 +1152,17 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
      {
       double used_prob = buy_allowed ? g_buyDecision.estimated_probability : g_sellDecision.estimated_probability;
       double used_lot  = buy_allowed ? buy_lot : sell_lot;
-      LogEvent(StringFormat("Order sent (lots=%.2f, prob=%.2f)", used_lot, used_prob));
+      LogEvent(StringFormat("Order sent (lots=%.2f, prob=%.2f)", used_lot, used_prob), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
      }
    else if(buy_signal || sell_signal)
      {
-      LogEvent(StringFormat("Order send failed: %d", GetLastError()));
+      LogEvent(StringFormat("Order send failed: %d", GetLastError()), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
      }
   }
 //+------------------------------------------------------------------+
 //| Calculate lot size based on risk                                 |
 //+------------------------------------------------------------------+
-double CalculateLotSize(const double stop_loss_points)
+double CalculateLotSize(const double risk_points) // [v3.3] Adaptive TakeProfit based on learning data
   {
    double lot_step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1013,8 +1202,8 @@ double CalculateLotSize(const double stop_loss_points)
       point_value = tick_value / tick_size;
 
    double risk_lot = 0.0;
-   if(stop_loss_points>0.0 && point_value>0.0)
-      risk_lot = risk_amount / (stop_loss_points * _Point * point_value);
+   if(risk_points>0.0 && point_value>0.0)
+      risk_lot = risk_amount / (risk_points * _Point * point_value); // [v3.3] Adaptive TakeProfit based on learning data
 
    if(lot_step>0.0 && risk_lot>0.0)
       risk_lot = MathFloor(risk_lot/lot_step) * lot_step;
@@ -1035,7 +1224,7 @@ double CalculateLotSize(const double stop_loss_points)
       override_lot = MathMax(min_lot, MathMin(max_lot, override_lot));
       override_lot = NormalizeDouble(override_lot, volume_digits);
       if(InpVerboseLogging && risk_lot>0.0 && override_lot>risk_lot)
-         LogEvent(StringFormat("Initial lot %.2f exceeds risk-based %.2f; override applied", override_lot, risk_lot));
+      LogEvent(StringFormat("Initial lot %.2f exceeds risk-based %.2f; override applied", override_lot, risk_lot), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
       if(risk_lot<=0.0 || override_lot>lot)
         {
@@ -1048,7 +1237,7 @@ double CalculateLotSize(const double stop_loss_points)
    lot = NormalizeDouble(lot, volume_digits);
 
    if(InpVerboseLogging && initial_override_used)
-      LogEvent(StringFormat("Initial lot override applied (%.2f lots)", lot));
+      LogEvent(StringFormat("Initial lot override applied (%.2f lots)", lot), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    return(lot);
   }
@@ -1063,7 +1252,7 @@ bool RiskChecks()
    double drawdown = (g_risk.peak_equity - equity) / MathMax(0.01, g_risk.peak_equity) * 100.0;
    if(drawdown >= InpMaxDrawdown)
      {
-      LogEvent("Trading halted: max drawdown reached");
+      LogEvent("Trading halted: max drawdown reached", true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
       return(false);
      }
 
@@ -1080,7 +1269,7 @@ bool RiskChecks()
    double daily_loss = (g_risk.daily_start_equity - equity) / MathMax(0.01, g_risk.daily_start_equity) * 100.0;
    if(daily_loss >= InpDailyLoss)
      {
-      LogEvent("Trading halted: daily loss limit reached");
+      LogEvent("Trading halted: daily loss limit reached", true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
       return(false);
      }
 
@@ -1088,63 +1277,194 @@ bool RiskChecks()
   }
 
 //+------------------------------------------------------------------+
-//| Manage open positions and trailing                               |
+//| Manage open positions and adaptive TP                             |
 //+------------------------------------------------------------------+
-void ManagePositions(const double atr_points)
+void ManagePositions(const double atr_points) // [v3.5 Update] Self-learning, cluster TP, and regression integration
   {
-   if(!PositionSelect(_Symbol))
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(IsTradeContextBusy())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   ManageCluster(POSITION_TYPE_BUY, atr_points);  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   ManageCluster(POSITION_TYPE_SELL, atr_points); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  }
+//+------------------------------------------------------------------+
+//| Cluster-based virtual take-profit handler                         |
+//+------------------------------------------------------------------+
+void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   int total_positions = PositionsTotal(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(total_positions<=0)
+      return; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double total_volume = 0.0;
+   double weighted_price = 0.0;
+   double probability_sum = 0.0;
+   double confidence_sum = 0.0;
+   double profit_sum = 0.0;
+   int    order_count = 0;
+   ulong  cluster_tickets[];
+   ArrayResize(cluster_tickets, 0);
+
+    for(int i=0;i<total_positions;i++)
+      {
+       ulong ticket = PositionGetTicket(i);
+       if(ticket==0)
+          continue; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+       if(!PositionSelectByTicket(ticket))
+          continue; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+       string pos_symbol = PositionGetString(POSITION_SYMBOL);
+       if(pos_symbol!=_Symbol)
+          continue;
+       ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+       if(pos_type!=direction)
+          continue;
+
+       double volume = PositionGetDouble(POSITION_VOLUME);
+       double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+       if(volume<=0.0)
+          continue;
+
+       total_volume += volume;
+       weighted_price += open_price * volume;
+       profit_sum += PositionGetDouble(POSITION_PROFIT);
+
+       ArrayResize(cluster_tickets, order_count+1);
+       cluster_tickets[order_count] = ticket;
+       order_count++;
+
+       SActiveTradeContext context;
+       if(ticket>0 && FindActiveTradeContext(ticket, context))
+         {
+          double ctx_prob = (context.win_probability>0.0 ? context.win_probability : context.probability);
+          double ctx_conf = (context.confidence_score>0.0 ? context.confidence_score : g_lastDecisionConfidence);
+          probability_sum += ctx_prob;
+          confidence_sum += ctx_conf;
+         }
+      }
+
+   if(order_count<=0 || total_volume<=0.0)
       return;
 
-   double current_price = 0.0;
-   ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-   double stop_loss     = PositionGetDouble(POSITION_SL);
-   double take_profit   = PositionGetDouble(POSITION_TP);
-   double volume        = PositionGetDouble(POSITION_VOLUME);
+   double avg_price = weighted_price / MathMax(total_volume, 0.0000001);
+   double market_price = (direction==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                                        : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double avg_profit_points = (direction==POSITION_TYPE_BUY) ? (market_price - avg_price) / _Point
+                                                             : (avg_price - market_price) / _Point;
 
-   double atr_for_trail = MathMax(atr_points, g_atrBuffer[0]/_Point);
-   if(atr_for_trail<=0.0)
-      return;
-   double trail_points  = atr_for_trail * (InpATRMultiplierSL/2.0);
+   double cluster_probability = (probability_sum>0.0 ? probability_sum / (double)order_count : g_lastDecisionProbability);
+   double cluster_confidence  = (confidence_sum>0.0 ? confidence_sum / (double)order_count : g_lastDecisionConfidence);
+   cluster_probability = MathMax(0.05, MathMin(0.95, cluster_probability));
+   cluster_confidence  = MathMax(0.0, MathMin(1.0, cluster_confidence));
 
-   bool update_needed = false;
+   double base_points = DetermineAdaptiveTakeProfitPoints(order_count-1, cluster_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double previous_target = g_takeProfitState.last_cluster_target;    // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double pre_adjust_target = 0.0;                                    // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   bool adjustment_logged = false;                                   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double final_target = ComputeClusterTarget(order_count, base_points, cluster_probability, cluster_confidence, atr_points, pre_adjust_target, adjustment_logged); // [v3.5 Update]
 
-   if(pos_type==POSITION_TYPE_BUY)
+   g_takeProfitState.last_probability = cluster_probability;         // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(adjustment_logged && (previous_target<=0.0 || MathAbs(final_target - previous_target)>0.5))
+      LogEvent(StringFormat("Adaptive TP adjusted: base=%.1f, probability=%.2f, finalTP=%.1f", pre_adjust_target, cluster_probability, final_target), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   g_takeProfitState.last_cluster_target = final_target;             // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   if(avg_profit_points>=final_target)
      {
-      current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double new_sl = current_price - trail_points*_Point;
-      if(stop_loss<new_sl)
+      string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
+      for(int t=0;t<order_count;t++)
         {
-         stop_loss = new_sl;
-         update_needed = true;
+         if(IsStopped())
+            break; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         if(IsTradeContextBusy())
+           {
+            Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+            break;
+           }
+         ulong ticket = cluster_tickets[t];
+         if(ticket>0)
+           {
+            if(!g_trade.PositionClose(ticket))
+               LogEvent(StringFormat("Cluster close retry required: %s ticket=%I64u", dir_label, ticket), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+           }
         }
+      LogEvent(StringFormat("Cluster TP hit: %s orders=%d avgPoints=%.1f target=%.1f profit=%.2f", dir_label, order_count, avg_profit_points, final_target, profit_sum)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
      }
-   else if(pos_type==POSITION_TYPE_SELL)
+  }
+//+------------------------------------------------------------------+
+double ComputeClusterTarget(const int order_count,const double base_points,const double probability,const double confidence,const double atr_points,double &pre_adjust_target,bool &logged) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   double adjusted = base_points;
+   if(order_count>0)
      {
-      current_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double new_sl = current_price + trail_points*_Point;
-      if(stop_loss>new_sl || stop_loss==0.0)
-        {
-         stop_loss = new_sl;
-         update_needed = true;
-        }
+      int effective_orders = order_count;
+      if(!g_takeProfitState.overlap_enabled && effective_orders>g_takeProfitState.overlap_threshold)
+         effective_orders = g_takeProfitState.overlap_threshold;
+      int reduction_index = MathMax(0, effective_orders-1);
+      adjusted -= g_takeProfitState.dynamic_reduction_points * reduction_index;
      }
 
-   if(update_needed)
+   adjusted = MathMax(5.0, adjusted);
+   if(atr_points>0.0)
+      adjusted = MathMax(adjusted, atr_points*0.25);
+
+   pre_adjust_target = adjusted;
+   bool adjustment_flag = false;
+   double final_target = ApplyProbabilityTargetAdjustment(adjusted, probability, confidence, adjustment_flag);
+   logged = adjustment_flag;
+   return(MathMax(5.0, final_target));
+  }
+//+------------------------------------------------------------------+
+double ApplyProbabilityTargetAdjustment(const double base_target,const double probability,const double confidence,bool &logged) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   double prob = MathMax(0.05, MathMin(0.95, probability));
+   double conf = MathMax(0.0, MathMin(1.0, confidence));
+   double adjustment = 1.0;
+
+   if(prob<0.55)
      {
-      if(g_trade.PositionModify(_Symbol, stop_loss, take_profit))
-         LogEvent(StringFormat("Trailing stop adjusted (%.2f lots)", volume));
+      double deficit = 0.55 - prob;
+      double intensity = MathMin(1.0, deficit / 0.20);
+      adjustment -= 0.30 * intensity;
      }
+   else if(prob>0.75)
+     {
+      double surplus = prob - 0.75;
+      double intensity = MathMin(1.0, surplus / 0.20);
+      adjustment += 0.20 * intensity;
+     }
+
+   adjustment *= (0.9 + 0.2 * conf);
+   double final_target = MathMax(5.0, base_target * adjustment);
+
+   logged = (MathAbs(adjustment-1.0)>0.001);
+
+   return(final_target);
   }
 //+------------------------------------------------------------------+
 //| Manage grid positions                                            |
 //+------------------------------------------------------------------+
 void ManageGrid(const double atr_points)
   {
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    if(!InpUseGrid || InpMaxGridLevels<=0)
       return;
 
    if(!PositionSelect(_Symbol))
       return;
+
+   datetime now = TimeCurrent(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(IsTradeContextBusy())
+     {
+      g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+      return;
+     }
 
    ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
    double last_price      = (pos_type==POSITION_TYPE_BUY) ? g_grid.last_buy_price : g_grid.last_sell_price;
@@ -1153,9 +1473,6 @@ void ManageGrid(const double atr_points)
                                                           : (g_grid.base_sell_lot>0.0 ? g_grid.base_sell_lot : current_volume);
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double sl_points   = MathMax(atr_points, g_atrBuffer[0]/_Point) * InpATRMultiplierSL;
-   double tp_points   = MathMax(atr_points, g_atrBuffer[0]/_Point) * InpATRMultiplierTP;
-
    double dynamic_step_points = AdaptiveGridSpacing(MathMax(atr_points, g_atrBuffer[0]/_Point));
 
    if(last_price<=0.0)
@@ -1193,17 +1510,39 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-            if(g_trade.Buy(lot, _Symbol, current_ask, current_ask - sl_points*_Point, current_ask + tp_points*_Point, "Grid BUY"))
+         double tp_points = DetermineAdaptiveTakeProfitPoints(MathMax(0, g_grid.buy_levels), g_buyDecision.estimated_probability); // [v3.4] Learning-based probability system and adaptive entry
+         if(atr_points>0.0) // [v3.3] Adaptive TakeProfit based on learning data
+            tp_points = MathMax(tp_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+         if((now - g_lastGridAttemptTime) < 2)
+            return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         g_lastGridAttemptTime  = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         if(g_trade.Buy(lot, _Symbol, 0.0, 0.0, 0.0, "Grid BUY")) // [v3.5 Update] Self-learning, cluster TP, and regression integration
               {
                LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", g_grid.buy_levels+1, dynamic_step_points));
                SPatternCandidate candidate = {POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.estimated_probability};
+               candidate.fast_ma       = g_buyDecision.fast_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.slow_ma       = g_buyDecision.slow_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.rsi           = g_buyDecision.rsi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.mfi           = g_buyDecision.mfi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume        = g_buyDecision.volume;       // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume_ratio  = g_buyDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.atr_points    = g_buyDecision.atr_points;   // [v3.4] Learning-based probability system and adaptive entry
                candidate.open_time      = TimeCurrent();      // [v3.1] log timing for grid trades
                candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY);
                candidate.equity_peak    = candidate.equity_before;
                candidate.equity_trough  = candidate.equity_before;
                candidate.is_grid        = true;
+               candidate.signal_pattern_id = g_buyDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.win_probability   = g_buyDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.confidence_score  = g_buyDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
                PushPendingPattern(candidate);
               }
+         else
+           {
+            g_tradeAttemptPending = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+           }
         }
      }
    else if(pos_type==POSITION_TYPE_SELL)
@@ -1216,17 +1555,39 @@ void ManageGrid(const double atr_points)
          if(lot_step>0.0)
            lot = MathFloor(lot/lot_step)*lot_step;
          lot = NormalizeDouble(lot, vol_digits);
-            if(g_trade.Sell(lot, _Symbol, current_bid, current_bid + sl_points*_Point, current_bid - tp_points*_Point, "Grid SELL"))
+         double tp_points = DetermineAdaptiveTakeProfitPoints(MathMax(0, g_grid.sell_levels), g_sellDecision.estimated_probability); // [v3.4] Learning-based probability system and adaptive entry
+         if(atr_points>0.0) // [v3.3] Adaptive TakeProfit based on learning data
+            tp_points = MathMax(tp_points, atr_points*0.5); // [v3.3] Adaptive TakeProfit based on learning data
+         if((now - g_lastGridAttemptTime) < 2)
+            return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         g_tradeAttemptPending = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         g_lastTradeAttemptTime = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         g_lastGridAttemptTime  = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         if(g_trade.Sell(lot, _Symbol, 0.0, 0.0, 0.0, "Grid SELL")) // [v3.5 Update] Self-learning, cluster TP, and regression integration
               {
                LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", g_grid.sell_levels+1, dynamic_step_points));
                SPatternCandidate candidate = {POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.estimated_probability};
+               candidate.fast_ma       = g_sellDecision.fast_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.slow_ma       = g_sellDecision.slow_ma;      // [v3.4] Learning-based probability system and adaptive entry
+               candidate.rsi           = g_sellDecision.rsi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.mfi           = g_sellDecision.mfi;          // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume        = g_sellDecision.volume;       // [v3.4] Learning-based probability system and adaptive entry
+               candidate.volume_ratio  = g_sellDecision.volume_ratio; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.atr_points    = g_sellDecision.atr_points;   // [v3.4] Learning-based probability system and adaptive entry
                candidate.open_time      = TimeCurrent();
                candidate.equity_before  = AccountInfoDouble(ACCOUNT_EQUITY);
                candidate.equity_peak    = candidate.equity_before;
                candidate.equity_trough  = candidate.equity_before;
                candidate.is_grid        = true;
+               candidate.signal_pattern_id = g_sellDecision.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.win_probability   = g_sellDecision.estimated_probability; // [v3.4] Learning-based probability system and adaptive entry
+               candidate.confidence_score  = g_sellDecision.confidence_score; // [v3.4] Learning-based probability system and adaptive entry
                PushPendingPattern(candidate);
               }
+         else
+           {
+            g_tradeAttemptPending = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+           }
         }
      }
   }
@@ -1304,7 +1665,7 @@ int EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool
    return(pattern_index); // [v3.1] expose pattern index while avoiding reference-based outputs
   }
 //+------------------------------------------------------------------+
-bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,double &adjusted_lot)
+bool PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction,const double base_lot,double &adjusted_lot) // [v3.5 Update] Self-learning, cluster TP, and regression integration
   {
    //--- enforce the 3-of-4 confirmation rule before looking at probabilities
    if(decision.confirmations_required>0 && decision.confirmed<decision.confirmations_required)
@@ -1313,10 +1674,25 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const double base_lot,d
       return(false);
      }
    double probability = decision.estimated_probability;
+   double bootstrap_probability = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(probability<bootstrap_probability)
+      probability = bootstrap_probability; // [v3.5 Update] Self-learning, cluster TP, and regression integration
    if(g_learningCount<MIN_LEARNING_ACTIVATION)
-      probability = MathMax(probability, 0.5);
+      probability = MathMax(probability, 0.58); // [v3.5 Update] Self-learning, cluster TP, and regression integration
    if(probability<=0.0)
       probability = 0.5;
+
+   bool fully_confirmed = (decision.confirmed>=PATTERN_BIT_COUNT);             // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(fully_confirmed)                                                         // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     {
+      adjusted_lot = base_lot;                                                 // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(probability<InpProbabilityThreshold)                                  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        {
+         string dir_label = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY"); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         LogEvent(StringFormat("Full confirmation probability override: %s pattern %s prob=%.2f conf=%.2f", dir_label, decision.signal_pattern_id, probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
+      return(true);
+     }
 
    if(probability>=InpProbabilityThreshold)
      {
@@ -1408,6 +1784,7 @@ void RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candid
    g_activeTrades[size].rsi          = candidate.rsi;
    g_activeTrades[size].mfi          = candidate.mfi;
    g_activeTrades[size].volume       = candidate.volume;
+   g_activeTrades[size].volume_ratio = candidate.volume_ratio;      // [v3.4] Learning-based probability system and adaptive entry
    g_activeTrades[size].atr_points   = candidate.atr_points;
    g_activeTrades[size].grid_level   = candidate.grid_level;
    g_activeTrades[size].lot_size     = candidate.lot_size;
@@ -1417,6 +1794,9 @@ void RegisterActiveTrade(const ulong position_id,const SPatternCandidate &candid
    g_activeTrades[size].equity_peak  = (candidate.equity_peak>0.0 ? candidate.equity_peak : g_activeTrades[size].equity_before);
    g_activeTrades[size].equity_trough= (candidate.equity_trough>0.0 ? candidate.equity_trough : g_activeTrades[size].equity_before);
    g_activeTrades[size].is_grid      = candidate.is_grid;
+   g_activeTrades[size].signal_pattern_id = candidate.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   g_activeTrades[size].win_probability   = candidate.win_probability;   // [v3.4] Learning-based probability system and adaptive entry
+   g_activeTrades[size].confidence_score  = candidate.confidence_score;  // [v3.4] Learning-based probability system and adaptive entry
   }
 //+------------------------------------------------------------------+
 bool ExtractActiveTrade(const ulong position_id,SActiveTradeContext &context)
@@ -1428,6 +1808,20 @@ bool ExtractActiveTrade(const ulong position_id,SActiveTradeContext &context)
         {
          context = g_activeTrades[i];
          RemoveActiveTradeByIndex(i);
+         return(true);
+        }
+     }
+   return(false);
+  }
+//+------------------------------------------------------------------+
+bool FindActiveTradeContext(const ulong position_id,SActiveTradeContext &context)
+  {
+   int size = ArraySize(g_activeTrades);
+   for(int i=0;i<size;i++)
+     {
+      if(g_activeTrades[i].position_id==position_id)
+        {
+         context = g_activeTrades[i];
          return(true);
         }
      }
@@ -1457,7 +1851,7 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
    record.slow_ma       = context.slow_ma;
    record.rsi           = context.rsi;
    record.mfi           = context.mfi;
-   record.volume        = context.lot_size;
+   record.volume        = (context.volume_ratio>0.0 ? context.volume_ratio : context.volume); // [v3.4] Learning-based probability system and adaptive entry
    record.profit        = profit;
    record.win_loss      = (profit>=0.0 ? "Win" : "Loss");
    record.grid_level    = context.grid_level;
@@ -1480,6 +1874,13 @@ void RecordTradePattern(const SActiveTradeContext &context,const double profit,c
    record.duration_sec  = (double)MathMax(0, (int)(deal_time - context.open_time)); // [v3.1]
    record.drawdown_pct  = drawdown_pct;              // [v3.1] store peak-to-valley drawdown
    record.trade_type    = (context.is_grid ? "Grid" : "Primary"); // [v3.1]
+   record.signal_pattern_id = context.signal_pattern_id; // [v3.4] Learning-based probability system and adaptive entry
+   record.win_probability   = (context.win_probability>0.0 ? context.win_probability : context.probability); // [v3.4] Learning-based probability system and adaptive entry
+   if(record.win_probability<=0.0) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.win_probability = (profit>=0.0 ? 0.65 : 0.45); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   record.confidence_score  = (context.confidence_score>0.0 ? context.confidence_score : ComputePatternConfidence(context.direction, context.pattern_index));  // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   record.win_probability   = MathMax(0.05, MathMin(0.95, record.win_probability)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   record.confidence_score  = MathMax(0.0, MathMin(1.0, record.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
    AppendLearningRecord(record);
 
@@ -1519,15 +1920,19 @@ void StoreLearningRecord(const SLearningRecord &record,const bool persist)
 
    g_learningRecords[insert_index] = record;
 
+   if(g_learningCount==MIN_LEARNING_ACTIVATION) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      LogEvent("Learning activated at trade #100, model training started.", true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
    TrimLearningBuffer();
 
-   if(!persist)
-      return;
+  if(!persist)
+     return;
 
-   RecalculateRecentMetrics();
-   UpdateProbabilityModel();
-   SaveLearningData();
-   SaveState();
+  RecalculateRecentMetrics();
+  UpdateProbabilityModel();
+  RefreshLearningProbabilities();
+  SaveLearningData();
+  SaveState();
 
    if(!g_initComplete)
       return;
@@ -1674,6 +2079,484 @@ double ComputeVolumeDeviation()
    return(accum / (double)count);
   }
 //+------------------------------------------------------------------+
+void InitializeRegressionModel()
+  {
+   g_regressionModel.intercept = 0.0;            // [v3.4] Learning-based probability system and adaptive entry
+   g_regressionModel.coeff_rsi = 0.0;            // [v3.4]
+  g_regressionModel.coeff_mfi = 0.0;            // [v3.4]
+  g_regressionModel.coeff_ma  = 0.0;            // [v3.4]
+  g_regressionModel.coeff_volume = 0.0;         // [v3.4]
+  g_regressionModel.last_update_trades = 0;     // [v3.4]
+  g_regressionModel.initialized = true;         // [v3.4]
+   g_regressionModel.error_variance = 0.0;       // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_regressionModel.dynamic_confidence = 0.0;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   g_regressionModel.sample_size = 0;            // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  }
+//+------------------------------------------------------------------+
+double RegressionPredictProbability(const double rsi,const double mfi,const double fast_ma,const double slow_ma,const double volume_ratio)
+  {
+   if(!g_regressionModel.initialized)
+      InitializeRegressionModel();
+
+   double feature_rsi = (rsi - 50.0) / 50.0;                  // [v3.4]
+   double feature_mfi = (mfi - 50.0) / 50.0;                  // [v3.4]
+   double denom = MathMax(_Point, MathAbs(slow_ma));           // [v3.4]
+   double feature_ma = (denom>0.0) ? (fast_ma - slow_ma) / denom : 0.0; // [v3.4]
+   feature_ma = MathMax(-5.0, MathMin(5.0, feature_ma));      // [v3.4]
+   double ratio = (volume_ratio>0.0 ? volume_ratio : 1.0);    // [v3.4]
+   double feature_volume = MathLog(MathMax(0.1, MathMin(10.0, ratio))); // [v3.4]
+
+   double z = g_regressionModel.intercept
+              + g_regressionModel.coeff_rsi * feature_rsi
+              + g_regressionModel.coeff_mfi * feature_mfi
+              + g_regressionModel.coeff_ma  * feature_ma
+              + g_regressionModel.coeff_volume * feature_volume; // [v3.4]
+   z = MathMax(-8.0, MathMin(8.0, z));                         // [v3.4]
+   double exp_val = MathExp(-z);
+   double prob = 1.0 / (1.0 + exp_val);
+   return(MathMax(0.05, MathMin(0.95, prob)));                 // [v3.4]
+  }
+//+------------------------------------------------------------------+
+double RegressionPredictProbability(const SLearningRecord &record)
+  {
+   return(RegressionPredictProbability(record.rsi, record.mfi, record.fast_ma, record.slow_ma, (record.volume>0.0 ? record.volume : 1.0))); // [v3.4]
+  }
+//+------------------------------------------------------------------+
+bool UpdateRegressionModelIfNeeded()
+  {
+   if(IsStopped())
+      return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   if(g_learningCount<MIN_LEARNING_ACTIVATION)
+      return(false);
+
+   if(!g_regressionModel.initialized)
+      InitializeRegressionModel();
+
+   if(g_stats.closed_trades<MIN_LEARNING_ACTIVATION)
+      return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   if((g_stats.closed_trades % 20)!=0)
+      return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   int trades_since_update = (int)g_stats.closed_trades - g_regressionModel.last_update_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(trades_since_update < 20)
+      return(false);
+
+   if(g_regressionModel.last_update_trades== (int)g_stats.closed_trades)
+      return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   double b0 = g_regressionModel.intercept;
+   double b1 = g_regressionModel.coeff_rsi;
+   double b2 = g_regressionModel.coeff_mfi;
+   double b3 = g_regressionModel.coeff_ma;
+   double b4 = g_regressionModel.coeff_volume;
+
+   const double alpha = 0.05;
+   const double lambda = 0.001;                                     // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   const double grad_clip = 5.0;                                     // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   const int iterations = 40;
+
+   for(int iter=0; iter<iterations; ++iter)
+     {
+      double grad0=0.0, grad1=0.0, grad2=0.0, grad3=0.0, grad4=0.0;
+      int samples = 0;
+      for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+        {
+         if(IsStopped())
+            break; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         SLearningRecord record;
+         if(!GetLearningRecord(ordinal, record))
+            continue;
+         double feature_rsi = (record.rsi - 50.0) / 50.0;
+         double feature_mfi = (record.mfi - 50.0) / 50.0;
+         double denom = MathMax(_Point, MathAbs(record.slow_ma));
+         double feature_ma = (denom>0.0) ? (record.fast_ma - record.slow_ma) / denom : 0.0;
+         feature_ma = MathMax(-5.0, MathMin(5.0, feature_ma));
+         double ratio = (record.volume>0.0 ? record.volume : 1.0);
+         double feature_volume = MathLog(MathMax(0.1, MathMin(10.0, ratio)));
+         double z = b0 + b1*feature_rsi + b2*feature_mfi + b3*feature_ma + b4*feature_volume;
+         z = MathMax(-8.0, MathMin(8.0, z));
+         double pred = 1.0 / (1.0 + MathExp(-z));
+         double target = (record.result>0 ? 1.0 : 0.0);
+         double error = pred - target;
+         grad0 += error;
+         grad1 += error * feature_rsi;
+         grad2 += error * feature_mfi;
+         grad3 += error * feature_ma;
+         grad4 += error * feature_volume;
+         samples++;
+        }
+
+      if(samples==0)
+         break;
+
+      grad1 += lambda * b1 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+      grad2 += lambda * b2 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+      grad3 += lambda * b3 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+      grad4 += lambda * b4 * samples;                                // [v3.4] Learning-based probability system and adaptive entry
+
+      double grad_norm = MathSqrt(grad0*grad0 + grad1*grad1 + grad2*grad2 + grad3*grad3 + grad4*grad4);
+      if(grad_norm>grad_clip && grad_norm>0.0)
+        {
+         double clip_scale = grad_clip / grad_norm;                  // [v3.4] Learning-based probability system and adaptive entry
+         grad0 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad1 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad2 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad3 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+         grad4 *= clip_scale;                                        // [v3.4] Learning-based probability system and adaptive entry
+        }
+
+      double scale = alpha / (double)samples;
+      b0 -= grad0 * scale;
+      b1 -= grad1 * scale;
+      b2 -= grad2 * scale;
+      b3 -= grad3 * scale;
+      b4 -= grad4 * scale;
+     }
+
+   g_regressionModel.intercept = b0;
+   g_regressionModel.coeff_rsi = b1;
+   g_regressionModel.coeff_mfi = b2;
+   g_regressionModel.coeff_ma  = b3;
+   g_regressionModel.coeff_volume = b4;
+   g_regressionModel.last_update_trades = (int)g_stats.closed_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   g_regressionModel.initialized = true;
+
+   double error_sum = 0.0;                                          // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double error_sq_sum = 0.0;                                       // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double win_profit_sum = 0.0;                                     // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double loss_profit_sum = 0.0;                                    // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int win_count = 0;
+   int loss_count = 0;
+   int sample_count = 0;
+
+  for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+    {
+     if(IsStopped())
+        break; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+     SLearningRecord record;
+     if(!GetLearningRecord(ordinal, record))
+        continue;
+      double feature_rsi = (record.rsi - 50.0) / 50.0;
+      double feature_mfi = (record.mfi - 50.0) / 50.0;
+      double denom = MathMax(_Point, MathAbs(record.slow_ma));
+      double feature_ma = (denom>0.0) ? (record.fast_ma - record.slow_ma) / denom : 0.0;
+      feature_ma = MathMax(-5.0, MathMin(5.0, feature_ma));
+      double ratio = (record.volume>0.0 ? record.volume : 1.0);
+      double feature_volume = MathLog(MathMax(0.1, MathMin(10.0, ratio)));
+      double z = b0 + b1*feature_rsi + b2*feature_mfi + b3*feature_ma + b4*feature_volume;
+      z = MathMax(-8.0, MathMin(8.0, z));
+      double pred = 1.0 / (1.0 + MathExp(-z));
+      double target = (record.result>0 ? 1.0 : 0.0);
+      double error = pred - target;
+      error_sum += error;
+      error_sq_sum += error*error;
+      if(record.result>0)
+        {
+         win_profit_sum += record.profit;
+         win_count++;
+        }
+      else
+        {
+         loss_profit_sum += record.profit;
+         loss_count++;
+        }
+      sample_count++;
+     }
+
+   double mean_error = (sample_count>0 ? error_sum/(double)sample_count : 0.0);
+   double variance = (sample_count>0 ? error_sq_sum/(double)sample_count - mean_error*mean_error : 0.0);
+   if(variance<0.0)
+      variance = 0.0;
+   double dynamic_confidence = 1.0 / (1.0 + MathSqrt(variance)*3.0);
+   if(sample_count<50 && sample_count>0)
+      dynamic_confidence *= (double)sample_count / 50.0;
+   g_regressionModel.error_variance = variance;
+   g_regressionModel.dynamic_confidence = MathMax(0.0, MathMin(1.0, dynamic_confidence));
+   g_regressionModel.sample_size = sample_count;
+
+   double avg_win = (win_count>0 ? win_profit_sum/(double)win_count : 0.0);
+   double avg_loss = (loss_count>0 ? MathAbs(loss_profit_sum/(double)loss_count) : 0.0);
+   double win_rate = (sample_count>0 ? (double)win_count/(double)sample_count : 0.0);
+
+   LogEvent(StringFormat("Regression updated: winRate=%.2f, confidence=%.2f, sampleSize=%d", win_rate, g_regressionModel.dynamic_confidence, sample_count), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   LogEvent(StringFormat("Regression coefficients: b0=%.4f b_rsi=%.4f b_mfi=%.4f b_ma=%.4f b_vol=%.4f avgWin=%.2f avgLoss=%.2f", b0, b1, b2, b3, b4, avg_win, avg_loss), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   return(true);
+  }
+//+------------------------------------------------------------------+
+void RefreshLearningProbabilities()
+  {
+   if(g_learningCount<=0)                                           // [v3.4] Learning-based probability system and adaptive entry
+      return;                                                       // [v3.4] Learning-based probability system and adaptive entry
+
+   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+     {
+      int idx = LearningBufferIndex(ordinal);
+      if(idx<0)
+         continue;
+      SLearningRecord record = g_learningRecords[idx];
+      ENUM_POSITION_TYPE direction = (StringFind(SafeToUpper(record.signal_type), "SELL")!=-1) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+      if(StringLen(record.signal_pattern_id)==0)
+         record.signal_pattern_id = BuildSignalPatternID(direction, record.pattern_index);
+      double regression_prob = RegressionPredictProbability(record);
+      double blended = ComputeBlendedProbability(direction, record.pattern_index, regression_prob);
+      double prior_prob = (record.win_probability>0.0 ? record.win_probability : (record.result>0 ? 0.65 : 0.35)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double confidence = ComputePatternConfidence(direction, record.pattern_index);
+      double regression_conf = g_regressionModel.dynamic_confidence; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double smoothing = MathMax(0.25, MathMin(0.75, regression_conf + 0.25)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double outcome_bias = (record.result>0 ? 0.03 : -0.03); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double target_prob = MathMax(0.05, MathMin(0.95, 0.6 * blended + 0.4 * prior_prob + outcome_bias)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.win_probability = prior_prob + (target_prob - prior_prob) * smoothing * 0.5; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.win_probability = MathMax(0.05, MathMin(0.95, record.win_probability)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+      double base_conf = (record.confidence_score>0.0 ? record.confidence_score : confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double combined_conf = 0.5 * base_conf + 0.5 * regression_conf; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(record.result>0)
+         combined_conf = MathMin(1.0, combined_conf + 0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      else
+         combined_conf = MathMax(0.0, combined_conf - 0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.confidence_score = base_conf + (combined_conf - base_conf) * smoothing; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      record.confidence_score = MathMax(0.0, MathMin(1.0, record.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      g_learningRecords[idx] = record;
+    }
+  }
+//+------------------------------------------------------------------+
+double ComputePatternConfidence(const ENUM_POSITION_TYPE direction,const int pattern_index)
+  {
+   int dir_index = (direction==POSITION_TYPE_SELL ? 1 : 0);
+   int bounded_index = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, pattern_index));
+   ulong trades = g_patternStats[dir_index][bounded_index].trades;
+   if(trades==0)
+      return(0.0);
+   double win_rate = g_patternModel[dir_index][bounded_index].probability;
+   double consistency = MathMin(1.0, MathAbs(win_rate - 0.5) * 2.0);
+   double sample_factor = MathMin(1.0, (double)trades / 150.0);
+   double confidence = 0.6 * sample_factor + 0.4 * consistency;
+   return(MathMax(0.0, MathMin(1.0, confidence)));
+  }
+//+------------------------------------------------------------------+
+double ComputeBlendedProbability(const ENUM_POSITION_TYPE direction,const int pattern_index,const double regression_prob)
+  {
+   int dir_index = (direction==POSITION_TYPE_SELL ? 1 : 0);
+   int bounded_index = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, pattern_index));
+   double historical_prob = g_patternModel[dir_index][bounded_index].probability;
+   if(historical_prob<=0.0)
+      historical_prob = regression_prob;
+   double model_prob = (regression_prob>0.0 ? regression_prob : historical_prob);
+   if(model_prob<=0.0)
+      model_prob = 0.5;
+   double confidence = ComputePatternConfidence(direction, bounded_index);
+   double historical_weight = MathMax(0.2, MathMin(0.8, confidence));
+   double blended = model_prob * (1.0 - historical_weight) + historical_prob * historical_weight;
+   return(MathMax(0.05, MathMin(0.95, blended)));
+  }
+//+------------------------------------------------------------------+
+double EstimateBootstrapProbability(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   int confirmations = MathMax(0, MathMin(PATTERN_BIT_COUNT, decision.confirmed)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double regression = (decision.regression_probability>0.0 ? decision.regression_probability : 0.5); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double base = 0.52 + (regression - 0.5) * 0.6; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   base += 0.08 * MathMax(0, confirmations - 2); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double ma_strength = MathMax(-1.0, MathMin(1.0, decision.ma_strength)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   base += ma_strength * 0.08; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double volume_ratio = MathMax(0.1, MathMin(3.0, decision.volume_ratio)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(volume_ratio>1.05)
+      base += MathMin(0.08, (volume_ratio-1.0)*0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   else if(volume_ratio<0.95)
+      base -= MathMin(0.08, (1.0-volume_ratio)*0.05); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   if(direction==POSITION_TYPE_BUY)
+     {
+      if(decision.fast_ma>decision.slow_ma)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.rsi<=g_params.rsi_oversold)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.mfi<=g_params.mfi_oversold)
+         base += 0.04; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
+   else
+     {
+      if(decision.fast_ma<decision.slow_ma)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.rsi>=g_params.rsi_overbought)
+         base += 0.05; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(decision.mfi>=g_params.mfi_overbought)
+         base += 0.04; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
+
+   return(MathMax(0.35, MathMin(0.92, base))); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  }
+//+------------------------------------------------------------------+
+double EstimateBootstrapConfidence(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   double probability_hint = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int confirmations = MathMax(0, MathMin(PATTERN_BIT_COUNT, decision.confirmed)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double confidence = 0.46 + 0.07 * MathMax(0, confirmations - 2); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   confidence += MathMin(0.12, MathAbs(probability_hint-0.5)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double regression_conf = g_regressionModel.dynamic_confidence; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(regression_conf>0.0)
+      confidence = MathMax(confidence, 0.45 + (regression_conf-0.5)*0.6); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   return(MathMax(0.35, MathMin(0.90, confidence))); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  }
+//+------------------------------------------------------------------+
+string BuildSignalPatternID(const ENUM_POSITION_TYPE direction,const int pattern_mask)
+  {
+   string prefix = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+   int masked = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, pattern_mask));
+   return(StringFormat("%s-%02X", prefix, masked));
+  }
+//+------------------------------------------------------------------+
+bool QueryPatternFromLearning(const string pattern_id,double &win_probability,double &confidence)
+  {
+   win_probability = 0.0;
+   confidence = 0.0;
+   if(StringLen(pattern_id)==0)
+      return(false);
+
+   double prob_sum = 0.0;
+   double weight_sum = 0.0;
+   double conf_sum = 0.0;
+   double conf_weight = 0.0;
+   int matches = 0;
+   double last_prob = 0.0;
+   double last_conf = 0.0;
+   int last_pattern = 0;
+   ENUM_POSITION_TYPE last_direction = POSITION_TYPE_BUY;
+
+   int collected = 0;
+   for(int ordinal=g_learningCount-1; ordinal>=0 && collected<PATTERN_LOOKBACK_WINDOW; ordinal--)
+     {
+      SLearningRecord record;
+      if(!GetLearningRecord(ordinal, record))
+         continue;
+      if(StringCompare(record.signal_pattern_id, pattern_id)!=0)
+         continue;
+      collected++;
+      matches++;
+      double rec_prob = (record.win_probability>0.0 ? record.win_probability : (record.result>0 ? 0.65 : 0.35)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double rec_conf = (record.confidence_score>0.0 ? record.confidence_score : 0.0); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      double weight = 1.0 + MathMax(0.0, rec_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      prob_sum += rec_prob * weight; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      weight_sum += weight; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(rec_conf>0.0)
+        {
+         conf_sum += rec_conf; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         conf_weight += 1.0; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         last_conf = rec_conf; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
+      last_prob = rec_prob;
+      last_pattern = record.pattern_index;
+      last_direction = (StringFind(SafeToUpper(record.signal_type), "SELL")!=-1) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+     }
+
+   if(matches==0)
+      return(false);
+
+   double avg_prob = (weight_sum>0.0 ? prob_sum/MathMax(weight_sum, 0.0001) : last_prob); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double avg_conf = (conf_weight>0.0 ? conf_sum/conf_weight : last_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(avg_conf<=0.0)
+      avg_conf = ComputePatternConfidence(last_direction, last_pattern); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   int dir_index = (last_direction==POSITION_TYPE_SELL ? 1 : 0); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int bounded_pattern = MathMax(0, MathMin(PATTERN_COMBINATIONS-1, last_pattern)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double model_prob = g_patternModel[dir_index][bounded_pattern].probability; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(model_prob>0.0)
+      avg_prob = 0.7 * avg_prob + 0.3 * MathMax(avg_prob, model_prob); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double regression_bias = g_regressionModel.dynamic_confidence - 0.5; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(MathAbs(regression_bias)>0.0001)
+      avg_prob = MathMax(0.05, MathMin(0.95, avg_prob + regression_bias * 0.08)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   double dynamic_conf = g_regressionModel.dynamic_confidence; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(dynamic_conf>0.0)
+      avg_conf = MathMax(avg_conf, 0.5*avg_conf + 0.5*dynamic_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   win_probability = MathMax(0.05, MathMin(0.95, avg_prob));
+   confidence = MathMax(0.0, MathMin(1.0, avg_conf));
+   return(true);
+  }
+//+------------------------------------------------------------------+
+bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE direction)
+  {
+   if(decision.confirmations_required>0 && decision.confirmed<decision.confirmations_required)
+      return(false);
+
+   bool partial_confirmation = (decision.confirmed==decision.confirmations_required && decision.confirmed<PATTERN_BIT_COUNT); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   bool full_confirmation = (decision.confirmed>=PATTERN_BIT_COUNT); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double bootstrap_probability = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double bootstrap_confidence = EstimateBootstrapConfidence(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   if(g_learningCount==0)                                           // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     {
+      if(partial_confirmation)
+        {
+         if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+           {
+            decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            LogEvent(StringFormat("Bootstrap trade approval: prob=%.2f conf=%.2f", bootstrap_probability, bootstrap_confidence)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            return(true);
+           }
+         LogEvent("Trade skipped: learning cache empty for partial confirmation"); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         return(false);
+        }
+      decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      return(true);
+     }
+
+   double stored_probability = 0.0;
+   double stored_confidence = 0.0;
+   bool has_history = QueryPatternFromLearning(decision.signal_pattern_id, stored_probability, stored_confidence);
+   if(!has_history)
+     {
+      if(full_confirmation)
+        {
+         decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, bootstrap_probability), 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         double full_conf = MathMax(MathMax(decision.confidence_score, bootstrap_confidence), 0.55); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         decision.confidence_score = MathMin(1.0, full_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         if(InpVerboseLogging)
+            LogEvent(StringFormat("Full confirmation override: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
+      if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        {
+         decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         LogEvent(StringFormat("Bootstrap trade approval: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, bootstrap_probability, bootstrap_confidence)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         return(true);
+        }
+      string dir_label = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+      LogEvent(StringFormat("Trade skipped: pattern %s (%s) not in learning cache", decision.signal_pattern_id, dir_label)); // [v3.4]
+      return(false);
+     }
+
+   decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, stored_probability), bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   decision.confidence_score = MathMax(MathMax(decision.confidence_score, stored_confidence), bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
+   if(!partial_confirmation) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     {
+      decision.estimated_probability = MathMax(decision.estimated_probability, 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      decision.confidence_score = MathMin(1.0, MathMax(decision.confidence_score, 0.55)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(InpVerboseLogging)
+        {
+         string dir_label3 = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+         LogEvent(StringFormat("Full confirmation override: pattern %s (%s) prob=%.2f conf=%.2f", decision.signal_pattern_id, dir_label3, decision.estimated_probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+        }
+      return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
+
+   if(decision.estimated_probability>=0.60 && decision.confidence_score>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      return(true);
+
+   string dir_label2 = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+   LogEvent(StringFormat("Trade deferred: pattern %s (%s) prob=%.2f conf=%.2f", decision.signal_pattern_id, dir_label2, stored_probability, stored_confidence)); // [v3.4]
+   return(false);
+  }
+//+------------------------------------------------------------------+
 string SafeToUpper(const string value)
   {
    string tmp = value;
@@ -1686,6 +2569,30 @@ double RecentWinRate()
    if(g_stats.window_trades==0)
       return(0.5);
    return((double)g_stats.window_wins / (double)g_stats.window_trades);
+  }
+//+------------------------------------------------------------------+
+double ComputeWindowWinRate(const int window) // [v3.3] Adaptive TakeProfit based on learning data
+  {
+   if(window<=0 || g_learningCount<=0)
+      return(0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   int sample = MathMin(window, g_learningCount); // [v3.3] Adaptive TakeProfit based on learning data
+   int start = g_learningCount - sample; // [v3.3] Adaptive TakeProfit based on learning data
+   if(start<0)
+      start = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   int wins = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   int counted = 0; // [v3.3] Adaptive TakeProfit based on learning data
+   for(int ordinal=start; ordinal<g_learningCount; ordinal++)
+     {
+      SLearningRecord rec; // [v3.3] Adaptive TakeProfit based on learning data
+      if(!GetLearningRecord(ordinal, rec))
+         continue; // [v3.3] Adaptive TakeProfit based on learning data
+      if(rec.result>0)
+         wins++; // [v3.3] Adaptive TakeProfit based on learning data
+      counted++; // [v3.3] Adaptive TakeProfit based on learning data
+     }
+   if(counted<=0)
+      return(0.5); // [v3.3] Adaptive TakeProfit based on learning data
+   return((double)wins / (double)counted); // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 double RecentAverageProfit(const int window)
@@ -1711,8 +2618,68 @@ double RecentAverageProfit(const int window)
    return(total / (double)counted); // [v3.1] feed adaptive learning-rate logic
   }
 //+------------------------------------------------------------------+
+double DetermineAdaptiveTakeProfitPoints(const int recovery_level,const double probability_hint) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   double base_points = g_takeProfitState.dynamic_virtual_points; // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double probability = (probability_hint>0.0 ? probability_hint : g_lastDecisionProbability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(probability>0.0)
+     {
+      double centered = MathMax(-0.5, MathMin(0.5, probability - 0.5));
+      double probability_scale = 1.0 + centered * 0.6;
+      base_points *= probability_scale;
+     }
+   base_points *= g_takeProfitState.probability_multiplier;
+   double floor_points = MathMax(10.0, g_takeProfitState.dynamic_virtual_points * 0.4);
+   if(base_points<floor_points)
+      base_points = floor_points;
+   return(base_points);
+  }
+//+------------------------------------------------------------------+
+void UpdateAdaptiveTakeProfitState() // [v3.5 Update] Self-learning, cluster TP, and regression integration
+  {
+   double win_rate = ComputeWindowWinRate(100);
+   double new_virtual = g_takeProfitState.base_virtual_points;
+   double new_reduction = g_takeProfitState.base_reduction_points;
+
+   if(win_rate<0.50)
+     {
+      new_virtual = g_takeProfitState.base_virtual_points * 0.85;
+      new_reduction = g_takeProfitState.base_reduction_points * 0.9;
+     }
+   else if(win_rate>0.70)
+     {
+      new_virtual = g_takeProfitState.base_virtual_points * 1.10;
+      new_reduction = g_takeProfitState.base_reduction_points;
+     }
+
+   new_virtual = MathMax(10.0, new_virtual);
+   new_reduction = MathMax(0.0, new_reduction);
+
+   bool changed = (MathAbs(new_virtual - g_takeProfitState.dynamic_virtual_points)>0.1 ||
+                   MathAbs(new_reduction - g_takeProfitState.dynamic_reduction_points)>0.1);
+
+   g_takeProfitState.dynamic_virtual_points   = new_virtual;
+   g_takeProfitState.dynamic_reduction_points = new_reduction;
+   g_takeProfitState.last_win_rate            = win_rate;
+
+   double confidence = MathMax(0.0, MathMin(1.0, g_lastDecisionConfidence));
+   double probability_bias = MathMax(-0.5, MathMin(0.5, g_lastDecisionProbability - 0.5));
+   double multiplier = 1.0 + probability_bias * (0.4 + 0.3 * confidence);
+   g_takeProfitState.probability_multiplier = MathMax(0.6, MathMin(1.4, multiplier));
+
+   if(changed)
+     {
+      LogEvent(StringFormat("Adaptive TP updated: winRate=%.2f, base=%.1f", win_rate, new_virtual)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+     }
+  }
+//+------------------------------------------------------------------+
 void UpdateProbabilityModel()
   {
+   double total_win_sum = 0.0;                                    // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double total_loss_sum = 0.0;                                   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int    total_win_count = 0;                                    // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   int    total_loss_count = 0;                                   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+
    for(int dir=0; dir<2; ++dir)
      {
       for(int pattern=0; pattern<PATTERN_COMBINATIONS; ++pattern)
@@ -1742,18 +2709,27 @@ void UpdateProbabilityModel()
         {
          g_patternStats[dir_index][pattern].wins++;
          g_patternStats[dir_index][pattern].sum_win_profit += record.profit;
+         total_win_sum += record.profit;                         // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         total_win_count++;                                      // [v3.5 Update] Self-learning, cluster TP, and regression integration
         }
       else
         {
          g_patternStats[dir_index][pattern].sum_loss_profit += record.profit;
+         total_loss_sum += record.profit;                        // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         total_loss_count++;                                     // [v3.5 Update] Self-learning, cluster TP, and regression integration
         }
      }
 
    for(int dir=0; dir<2; ++dir)
      {
       for(int pattern=0; pattern<PATTERN_COMBINATIONS; ++pattern)
-         UpdateProbabilityModel(dir, pattern);
+       UpdateProbabilityModel(dir, pattern);
      }
+   int total_samples = total_win_count + total_loss_count;       // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double avg_win = (total_win_count>0 ? total_win_sum / (double)total_win_count : 0.0); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double avg_loss = (total_loss_count>0 ? MathAbs(total_loss_sum / (double)total_loss_count) : 0.0); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   double win_rate = (total_samples>0 ? (double)total_win_count / (double)total_samples : 0.0); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   LogEvent(StringFormat("Probability model refreshed: winRate=%.2f avgWin=%.2f avgLoss=%.2f samples=%d", win_rate, avg_win, avg_loss, total_samples), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
   }
 //+------------------------------------------------------------------+
 void UpdateProbabilityModel(const int dir_index, const int pattern_index)
@@ -1780,12 +2756,23 @@ void LoadState()
    if(handle==INVALID_HANDLE)
       return;
 
-   // skip header line
+   string header_fields[];
+   bool has_closed_trades = false; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
+   // parse header line
    if(!FileIsEnding(handle))
      {
-      FileReadString(handle);
-      while(!FileIsLineEnding(handle) && !FileIsEnding(handle))
-         FileReadString(handle);
+      while(true)
+        {
+         string field = FileReadString(handle);
+         int idx = ArraySize(header_fields);
+         ArrayResize(header_fields, idx+1);
+         header_fields[idx] = field;
+         if(StringCompare(field, "ClosedTrades")==0)
+            has_closed_trades = true; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+         if(FileIsLineEnding(handle) || FileIsEnding(handle))
+            break;
+        }
      }
 
    if(!FileIsEnding(handle))
@@ -1801,10 +2788,14 @@ void LoadState()
       g_params.volume_period     = (int)FileReadNumber(handle);
       g_params.volume_multiplier = FileReadNumber(handle);
       g_stats.total_trades       = (ulong)FileReadNumber(handle);
+      if(has_closed_trades)
+         g_stats.closed_trades  = (ulong)FileReadNumber(handle); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
       g_stats.total_wins         = (ulong)FileReadNumber(handle);
       g_stats.total_losses       = (ulong)FileReadNumber(handle);
       g_stats.total_profit       = FileReadNumber(handle);
      }
+   if(!has_closed_trades)
+      g_stats.closed_trades = 0; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    g_params.fast_period   = MathMax(2, g_params.fast_period);
    g_params.slow_period   = MathMax(g_params.fast_period+2, g_params.slow_period);
@@ -1817,6 +2808,10 @@ void LoadState()
    g_stats.window_wins   = 0;
    g_stats.window_losses = 0;
    g_stats.window_profit = 0.0;
+   if(g_stats.closed_trades>g_stats.total_trades)
+      g_stats.closed_trades = g_stats.total_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(g_stats.closed_trades==0 && g_stats.total_trades>0 && g_learningCount>0)
+      g_stats.closed_trades = MathMin(g_stats.total_trades, (ulong)g_learningCount); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    FileClose(handle);
   }
@@ -1831,7 +2826,7 @@ void SaveState()
              "FastMA","SlowMA","RSIPeriod","RSI_Overbought","RSI_Oversold",
              "MFIPeriod","MFI_Overbought","MFI_Oversold",
              "VolumePeriod","VolumeMultiplier",
-             "TotalTrades","TotalWins","TotalLosses","TotalProfit");
+             "TotalTrades","ClosedTrades","TotalWins","TotalLosses","TotalProfit"); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    FileWrite(handle,
              g_params.fast_period,
@@ -1845,6 +2840,7 @@ void SaveState()
              g_params.volume_period,
              g_params.volume_multiplier,
              g_stats.total_trades,
+             g_stats.closed_trades,
              g_stats.total_wins,
              g_stats.total_losses,
              g_stats.total_profit);
@@ -1880,7 +2876,7 @@ void SelfTuneParameters()
    LogEvent(StringFormat("SelfTune cycle triggered: trades=%I64u, winRate=%.4f, learningRate=%.2f", // [v3.1]
                          g_stats.total_trades,
                          win_rate,
-                         learningRate));
+                         learningRate), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    //--- accumulate indicator snapshots for winners and losers to bias thresholds
    double win_rsi_sum=0.0, loss_rsi_sum=0.0, win_mfi_sum=0.0, loss_mfi_sum=0.0;
@@ -1954,13 +2950,14 @@ void SelfTuneParameters()
      }
 
    //--- emit a detailed learning summary for audit trails
-   string report = StringFormat("Self-tune v3 lr=%.2f winRate=%.2f avgProfit=%.2f fastMA=%d slowMA=%d RSI(%.1f/%.1f) MFI(%.1f/%.1f) VolMult=%.2f",
-                                learningRate, win_rate, avg_profit, g_params.fast_period, g_params.slow_period,
-                                g_params.rsi_oversold, g_params.rsi_overbought,
-                                g_params.mfi_oversold, g_params.mfi_overbought,
-                                g_params.volume_multiplier);
-   LogEvent(report);
-   g_lastTuneWinRate = win_rate;      // [v3.1] refresh deviation baseline
+    string report = StringFormat("Self-tune v3 lr=%.2f winRate=%.2f avgProfit=%.2f fastMA=%d slowMA=%d RSI(%.1f/%.1f) MFI(%.1f/%.1f) VolMult=%.2f",
+                                 learningRate, win_rate, avg_profit, g_params.fast_period, g_params.slow_period,
+                                 g_params.rsi_oversold, g_params.rsi_overbought,
+                                 g_params.mfi_oversold, g_params.mfi_overbought,
+                                 g_params.volume_multiplier);
+    LogEvent(report, true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+    UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
+    g_lastTuneWinRate = win_rate;      // [v3.1] refresh deviation baseline
    g_hasTuneBaseline = true;
    SaveState();
    RecreateIndicators();
@@ -1982,6 +2979,7 @@ void LoadLearningData()
 
    string header_fields[];
    bool   has_extended_columns = false;
+   bool   has_probability_columns = false; // [v3.4] Learning-based probability system and adaptive entry
    SLearningRecord record;
 
    for(int dir=0; dir<2; ++dir)
@@ -2023,8 +3021,9 @@ void LoadLearningData()
       if(StringCompare(header_fields[i], "EquityBefore")==0)
         {
          has_extended_columns = true;
-         break;
         }
+      if(StringCompare(header_fields[i], "SignalPatternID")==0)
+         has_probability_columns = true;
      }
 
    while(!FileIsEnding(handle))
@@ -2061,6 +3060,8 @@ void LoadLearningData()
         }
 
       int expected_columns = (has_extended_columns ? 20 : 15);
+      if(has_probability_columns)
+         expected_columns += 3;
       if(ArraySize(fields) < expected_columns)
          continue;
 
@@ -2117,8 +3118,27 @@ void LoadLearningData()
 
       record.pattern_index = (int)SafeCsvToDouble(fields[field_index++], malformed);
 
+      if(has_probability_columns && (field_index+2) < ArraySize(fields))
+        {
+         record.signal_pattern_id = CsvUnquote(fields[field_index++]);
+         record.win_probability   = SafeCsvToDouble(fields[field_index++], malformed);
+         record.confidence_score  = SafeCsvToDouble(fields[field_index++], malformed);
+        }
+      else
+        {
+         record.signal_pattern_id = "";
+         record.win_probability = 0.0;
+         record.confidence_score = 0.0;
+        }
+
       if(malformed)
          continue;
+
+      if(StringLen(record.signal_pattern_id)==0)
+        {
+         ENUM_POSITION_TYPE derived_dir = (StringFind(SafeToUpper(record.signal_type), "SELL")!=-1) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+         record.signal_pattern_id = BuildSignalPatternID(derived_dir, record.pattern_index);
+        }
 
       StoreLearningRecord(record, false);
      }
@@ -2127,10 +3147,17 @@ void LoadLearningData()
 
    RecalculateRecentMetrics();
    UpdateProbabilityModel();
+   bool regression_updated = UpdateRegressionModelIfNeeded(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   RefreshLearningProbabilities();
+   if(regression_updated) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      SaveLearningData(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   UpdateAdaptiveTakeProfitState(); // [v3.3] Adaptive TakeProfit based on learning data
   }
 //+------------------------------------------------------------------+
 void SaveLearningData()
   {
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    int handle = FileOpen(g_learningFileName, FILE_WRITE|FILE_CSV|FILE_ANSI);
    if(handle==INVALID_HANDLE)
       return;
@@ -2138,10 +3165,13 @@ void SaveLearningData()
    FileWrite(handle,
              "TradeID","Symbol","Time","FastMA","SlowMA","RSI","MFI","Volume",
              "Profit","WinLoss","GridLevel","ATR","SignalType","Result",
-             "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex");
+             "EquityBefore","EquityAfter","DurationSec","DrawdownPct","TradeType","PatternIndex",
+             "SignalPatternID","WinProbability","ConfidenceScore");
 
-   for(int ordinal=0; ordinal<g_learningCount; ordinal++)
-     {
+    for(int ordinal=0; ordinal<g_learningCount; ordinal++)
+      {
+      if(IsStopped())
+         break; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
       SLearningRecord record;
       if(!GetLearningRecord(ordinal, record))
          continue;
@@ -2165,7 +3195,10 @@ void SaveLearningData()
                 record.duration_sec,
                 record.drawdown_pct,
                 CsvQuote(record.trade_type),
-                record.pattern_index);
+                record.pattern_index,
+                CsvQuote(record.signal_pattern_id),
+                record.win_probability,
+                record.confidence_score);
      }
    FileClose(handle);
   }
@@ -2186,8 +3219,13 @@ string CsvUnquote(const string value)
    return(tmp);
   }
 //+------------------------------------------------------------------+
-void LogEvent(const string message)
+void LogEvent(const string message,const bool essential)
   {
+   if(!essential && !InpVerboseLogging)
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(IsStopped() && !essential)
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+
    datetime ts = TimeCurrent();
    int handle = FileOpen(g_logFileName, FILE_WRITE|FILE_READ|FILE_CSV|FILE_ANSI);
    if(handle==INVALID_HANDLE)
@@ -2202,6 +3240,8 @@ void LogEvent(const string message)
 //+------------------------------------------------------------------+
 void LogIndicatorSnapshot()
   {
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    string detail = StringFormat("Indicators fastMA=%.5f slowMA=%.5f RSI=%.2f MFI=%.2f Volume=%.0f ATR=%.1f",
                                g_fastMABuffer[0], g_slowMABuffer[0], g_rsiBuffer[0], g_mfiBuffer[0], g_volBuffer[0], g_atrBuffer[0]);
    LogEvent(detail);
@@ -2209,6 +3249,8 @@ void LogIndicatorSnapshot()
 //+------------------------------------------------------------------+
 void LogTrade(const ulong deal_ticket, const double deal_profit, const string direction)
   {
+   if(IsStopped())
+      return; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    datetime ts = TimeCurrent();
    string message = StringFormat("ticket=%I64u,direction=%s,profit=%.2f", deal_ticket, direction, deal_profit); // [v3.1] structured log payload
    int handle = FileOpen(g_logFileName, FILE_WRITE|FILE_READ|FILE_CSV|FILE_ANSI);
