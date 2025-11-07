@@ -913,7 +913,16 @@ bool IsNewBar()
 //+------------------------------------------------------------------+
 bool IsTradeContextBusy()
   {
-   return(g_trade.IsBusy());
+   if(MQLInfoInteger(MQL_TRADE_ALLOWED)==0)
+      return(true);
+
+   if(TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)==0)
+      return(true);
+
+   if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)==0)
+      return(true);
+
+   return(false);
   }
 //+------------------------------------------------------------------+
 //| Evaluate core signals and probability                             |
