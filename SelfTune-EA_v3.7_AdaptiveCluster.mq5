@@ -1982,20 +1982,32 @@ void StoreLearningRecord(const SLearningRecord &record,const bool persist)
   g_learningRecords[insert_index] = record;
   g_learningCount++; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
-  if(g_learningCount==MIN_LEARNING_ACTIVATION) // [v3.5 Update] Self-learning, cluster TP, and regression integration
-      LogEvent("Learning activated at trade #100", true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+  bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_ACTIVATION); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+  bool hit_activation = (g_learningCount==MIN_LEARNING_ACTIVATION); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
    TrimLearningBuffer();
 
   if(!persist)
      return;
 
-  RecalculateRecentMetrics();
-  UpdateProbabilityModel();
-  RefreshLearningProbabilities();
+  if(hit_activation)
+     LogLearningEvent("Learning activated", true);
+
+  if(learning_active)
+    {
+     RecalculateRecentMetrics();
+     UpdateProbabilityModel();
+     RefreshLearningProbabilities();
+    }
+
   SaveLearningData();
   SaveState();
-  LogLearningEvent(StringFormat("Learning updated: records=%d", g_learningCount)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+
+  if(learning_active)
+    {
+     LogLearningEvent("Learning updated", true);
+     LogLearningEvent(StringFormat("Learning updated: records=%d", g_learningCount));
+    }
 
    if(!g_initComplete)
       return;
@@ -2344,6 +2356,7 @@ bool UpdateRegressionModelIfNeeded()
    double win_rate = (sample_count>0 ? (double)win_count/(double)sample_count : 0.0);
 
    LogLearningEvent(StringFormat("Learning retrained at trade #%I64u", g_stats.closed_trades), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+   LogLearningEvent("Regression updated", true);
    LogLearningEvent(StringFormat("Regression updated: coeff_rsi=%.3f, coeff_mfi=%.3f, coeff_ma=%.3f, coeff_vol=%.3f", b1, b2, b3, b4), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    LogLearningEvent(StringFormat("Regression summary: trades=%d, winRate=%.2f, confidence=%.2f", sample_count, win_rate, g_regressionModel.dynamic_confidence), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    return(true);
@@ -2548,76 +2561,94 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
    if(decision.confirmations_required>0 && decision.confirmed<decision.confirmations_required)
       return(false);
 
-   bool partial_confirmation = (decision.confirmed==decision.confirmations_required && decision.confirmed<PATTERN_BIT_COUNT); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-   bool full_confirmation = (decision.confirmed>=PATTERN_BIT_COUNT); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-   double bootstrap_probability = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-   double bootstrap_confidence = EstimateBootstrapConfidence(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   bool partial_confirmation = (decision.confirmed==decision.confirmations_required && decision.confirmed<PATTERN_BIT_COUNT);
+   bool full_confirmation = (decision.confirmed>=PATTERN_BIT_COUNT);
+   double bootstrap_probability = EstimateBootstrapProbability(decision, direction);
+   double bootstrap_confidence = EstimateBootstrapConfidence(decision, direction);
+   bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_ACTIVATION);
 
-   if(g_learningCount==0)                                           // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(g_learningCount==0)
      {
       if(partial_confirmation)
         {
-         if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50)
            {
-            decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-            decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-            LogEvent(StringFormat("Bootstrap trade approval: prob=%.2f conf=%.2f", bootstrap_probability, bootstrap_confidence)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability);
+            decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence);
+            LogEvent(StringFormat("Bootstrap trade approval: prob=%.2f conf=%.2f", bootstrap_probability, bootstrap_confidence));
             return(true);
            }
-         LogEvent("Trade skipped: learning cache empty for partial confirmation"); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         LogEvent("Trade skipped: learning cache empty for partial confirmation");
          return(false);
         }
-      decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-      decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability);
+      decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence);
       return(true);
      }
 
    double stored_probability = 0.0;
    double stored_confidence = 0.0;
    bool has_history = QueryPatternFromLearning(decision.signal_pattern_id, stored_probability, stored_confidence);
+
+   if(learning_active)
+     {
+      if(!has_history)
+        {
+         string dir_label = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
+         LogEvent(StringFormat("Trade skipped: pattern %s (%s) missing from learning cache", decision.signal_pattern_id, dir_label));
+         return(false);
+        }
+      decision.estimated_probability = MathMax(decision.estimated_probability, stored_probability);
+      decision.confidence_score = MathMax(decision.confidence_score, stored_confidence);
+      if(decision.estimated_probability>=0.60 && decision.confidence_score>=0.50)
+         return(true);
+      LogLearningEvent(StringFormat("Pattern %s rejected: WinProb=%.2f, Conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score), true);
+      return(false);
+     }
+
    if(!has_history)
      {
       if(full_confirmation)
         {
-         decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, bootstrap_probability), 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-         double full_conf = MathMax(MathMax(decision.confidence_score, bootstrap_confidence), 0.55); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-         decision.confidence_score = MathMin(1.0, full_conf); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, bootstrap_probability), 0.60);
+         double full_conf = MathMax(MathMax(decision.confidence_score, bootstrap_confidence), 0.55);
+         decision.confidence_score = MathMin(1.0, full_conf);
          if(InpVerboseLogging)
-            LogEvent(StringFormat("Full confirmation override: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-         return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+            LogEvent(StringFormat("Full confirmation override: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score));
+         return(true);
         }
-      if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      if(bootstrap_probability>=0.60 && bootstrap_confidence>=0.50)
         {
-         decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-         decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-         LogEvent(StringFormat("Bootstrap trade approval: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, bootstrap_probability, bootstrap_confidence)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         decision.estimated_probability = MathMax(decision.estimated_probability, bootstrap_probability);
+         decision.confidence_score = MathMax(decision.confidence_score, bootstrap_confidence);
+         LogEvent(StringFormat("Bootstrap trade approval: pattern %s prob=%.2f conf=%.2f", decision.signal_pattern_id, bootstrap_probability, bootstrap_confidence));
          return(true);
         }
       string dir_label = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
-      LogEvent(StringFormat("Trade skipped: pattern %s (%s) not in learning cache", decision.signal_pattern_id, dir_label)); // [v3.4]
+      LogEvent(StringFormat("Trade skipped: pattern %s (%s) not in learning cache", decision.signal_pattern_id, dir_label));
       return(false);
      }
 
-   decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, stored_probability), bootstrap_probability); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-   decision.confidence_score = MathMax(MathMax(decision.confidence_score, stored_confidence), bootstrap_confidence); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   decision.estimated_probability = MathMax(MathMax(decision.estimated_probability, stored_probability), bootstrap_probability);
+   decision.confidence_score = MathMax(MathMax(decision.confidence_score, stored_confidence), bootstrap_confidence);
 
-   if(!partial_confirmation) // [v3.5 Update] Self-learning, cluster TP, and regression integration
+   if(!partial_confirmation)
      {
-      decision.estimated_probability = MathMax(decision.estimated_probability, 0.60); // [v3.5 Update] Self-learning, cluster TP, and regression integration
-      decision.confidence_score = MathMin(1.0, MathMax(decision.confidence_score, 0.55)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      decision.estimated_probability = MathMax(decision.estimated_probability, 0.60);
+      decision.confidence_score = MathMin(1.0, MathMax(decision.confidence_score, 0.55));
       if(InpVerboseLogging)
         {
          string dir_label3 = (direction==POSITION_TYPE_SELL ? "SELL" : "BUY");
-         LogEvent(StringFormat("Full confirmation override: pattern %s (%s) prob=%.2f conf=%.2f", decision.signal_pattern_id, dir_label3, decision.estimated_probability, decision.confidence_score)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+         LogEvent(StringFormat("Full confirmation override: pattern %s (%s) prob=%.2f conf=%.2f", decision.signal_pattern_id, dir_label3, decision.estimated_probability, decision.confidence_score));
         }
-      return(true); // [v3.5 Update] Self-learning, cluster TP, and regression integration
+      return(true);
      }
 
-  if(decision.estimated_probability>=0.60 && decision.confidence_score>=0.50) // [v3.5 Update] Self-learning, cluster TP, and regression integration
-     return(true);
+   if(decision.estimated_probability>=0.60 && decision.confidence_score>=0.50)
+      return(true);
 
-  LogLearningEvent(StringFormat("Pattern %s rejected: WinProb=%.2f, Conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-  return(false);
+   LogLearningEvent(StringFormat("Pattern %s rejected: WinProb=%.2f, Conf=%.2f", decision.signal_pattern_id, decision.estimated_probability, decision.confidence_score), true);
+   return(false);
   }
 //+------------------------------------------------------------------+
 string SafeToUpper(const string value)
