@@ -29,8 +29,9 @@
 const int     MAX_VOLUME_BUFFER       = 512;
 const int     MAX_LEARNING_RECORDS    = 700;
 const int     MIN_LEARNING_ACTIVATION = 100;
-const ulong   MIN_LEARNING_CLOSED_ULO = (ulong)MIN_LEARNING_ACTIVATION; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-const ulong   REGRESSION_RETRAIN_STEP = 20;   // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+const int     MIN_LEARNING_CLOSED_TRADES = MIN_LEARNING_ACTIVATION; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+const int     REGRESSION_RETRAIN_STEP = 20;   // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+const int     INT_SAFE_MAX            = 2147483647; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 const int     RECENT_METRIC_WINDOW    = 50;
 const int     PATTERN_LOOKBACK_WINDOW = 60;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
@@ -355,6 +356,7 @@ bool        RiskChecks();
 void        ManagePositions(const double atr_points);
 void        ManageGrid(const double atr_points);
 void        ResetGridStateIfNeeded();
+int         SafeClosedTradeCount(); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 void        InitializeAdaptiveTakeProfit(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 void        UpdateAdaptiveTakeProfitState(); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 double      DetermineAdaptiveTakeProfitPoints(const int recovery_level,const double probability_hint); // [v3.5 Update] Self-learning, cluster TP, and regression integration
@@ -712,7 +714,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
            }
         }
 
-      if(g_stats.closed_trades>=MIN_LEARNING_CLOSED_ULO && (g_stats.closed_trades % REGRESSION_RETRAIN_STEP)==0)
+      int closed_trades = SafeClosedTradeCount();
+      if(closed_trades>=MIN_LEARNING_CLOSED_TRADES && (closed_trades % REGRESSION_RETRAIN_STEP)==0)
          regression_updated = UpdateRegressionModelIfNeeded(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
      }
 
@@ -1316,6 +1319,16 @@ double NormalizeGridStep(const double raw_points) // [v3.7 Update] Grid spacing 
    if(rounded<=0.0)
       rounded = baseline;
    return(MathMax(1.0, rounded));
+  }
+
+int SafeClosedTradeCount() // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+  {
+   long closed = (long)g_stats.closed_trades;
+   if(closed<0)
+      closed = 0;
+   if(closed>INT_SAFE_MAX)
+      closed = INT_SAFE_MAX;
+   return((int)closed);
   }
 
 double CalculateLotSize(const double risk_points) // [v3.3] Adaptive TakeProfit based on learning data
@@ -2245,7 +2258,8 @@ void StoreLearningRecord(const SLearningRecord &record,const bool persist)
   g_learningRecords[insert_index] = record;
   g_learningCount++; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
-  bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_CLOSED_ULO); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+  int closed_trades = SafeClosedTradeCount();
+  bool learning_active = (closed_trades>=MIN_LEARNING_CLOSED_TRADES); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
   bool hit_activation = (g_learningCount==MIN_LEARNING_ACTIVATION); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
    TrimLearningBuffer();
@@ -2471,17 +2485,18 @@ bool UpdateRegressionModelIfNeeded()
    if(!g_regressionModel.initialized)
       InitializeRegressionModel();
 
-   if(g_stats.closed_trades<MIN_LEARNING_CLOSED_ULO)
+   int closed_trades = SafeClosedTradeCount();
+   if(closed_trades<MIN_LEARNING_CLOSED_TRADES)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
-   if((g_stats.closed_trades % REGRESSION_RETRAIN_STEP)!=0)
+   if((closed_trades % REGRESSION_RETRAIN_STEP)!=0)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
-   int trades_since_update = (int)g_stats.closed_trades - g_regressionModel.last_update_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
-   if(trades_since_update < (int)REGRESSION_RETRAIN_STEP)
+   int trades_since_update = closed_trades - g_regressionModel.last_update_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   if(trades_since_update < REGRESSION_RETRAIN_STEP)
       return(false);
 
-   if(g_regressionModel.last_update_trades== (int)g_stats.closed_trades)
+   if(g_regressionModel.last_update_trades==closed_trades)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    double b0 = g_regressionModel.intercept;
@@ -2558,7 +2573,8 @@ bool UpdateRegressionModelIfNeeded()
    g_regressionModel.coeff_mfi = b2;
    g_regressionModel.coeff_ma  = b3;
    g_regressionModel.coeff_volume = b4;
-   g_regressionModel.last_update_trades = (int)g_stats.closed_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+   closed_trades = SafeClosedTradeCount();
+   g_regressionModel.last_update_trades = closed_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    g_regressionModel.initialized = true;
 
    double error_sum = 0.0;                                          // [v3.5 Update] Self-learning, cluster TP, and regression integration
@@ -2618,7 +2634,7 @@ bool UpdateRegressionModelIfNeeded()
    double avg_loss = (loss_count>0 ? MathAbs(loss_profit_sum/(double)loss_count) : 0.0);
    double win_rate = (sample_count>0 ? (double)win_count/(double)sample_count : 0.0);
 
-   LogLearningEvent(StringFormat("Learning retrained at trade #%I64u", g_stats.closed_trades), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+   LogLearningEvent(StringFormat("Learning retrained at trade #%d", closed_trades), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    LogLearningEvent("Regression updated", true);
    LogLearningEvent(StringFormat("Regression updated: coeff_rsi=%.3f, coeff_mfi=%.3f, coeff_ma=%.3f, coeff_vol=%.3f", b1, b2, b3, b4), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    LogLearningEvent(StringFormat("Regression summary: trades=%d, winRate=%.2f, confidence=%.2f", sample_count, win_rate, g_regressionModel.dynamic_confidence), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
@@ -2828,7 +2844,7 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
    bool full_confirmation = (decision.confirmed>=PATTERN_BIT_COUNT);
    double bootstrap_probability = EstimateBootstrapProbability(decision, direction);
    double bootstrap_confidence = EstimateBootstrapConfidence(decision, direction);
-   bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_CLOSED_ULO);
+   bool learning_active = (SafeClosedTradeCount()>=MIN_LEARNING_CLOSED_TRADES);
 
    if(g_learningCount==0)
      {
