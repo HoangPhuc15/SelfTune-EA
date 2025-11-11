@@ -131,6 +131,8 @@ struct SGridState
    double   last_sell_price;
    double   base_buy_lot;
    double   base_sell_lot;
+   double   base_buy_step;
+   double   base_sell_step;
   };
 
 struct SPatternStats
@@ -615,14 +617,22 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       if(deal_type==DEAL_TYPE_BUY)
         {
         if(g_grid.buy_levels==0)
-           g_grid.base_buy_lot = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+          {
+           double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+           g_grid.base_buy_lot  = normalized_entry;
+           g_grid.base_buy_step = 0.0;
+          }
          g_grid.buy_levels++;
          g_grid.last_buy_price = deal_price;
         }
       else if(deal_type==DEAL_TYPE_SELL)
         {
         if(g_grid.sell_levels==0)
-           g_grid.base_sell_lot = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+          {
+           double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+           g_grid.base_sell_lot  = normalized_entry;
+           g_grid.base_sell_step = 0.0;
+          }
          g_grid.sell_levels++;
          g_grid.last_sell_price = deal_price;
         }
@@ -677,24 +687,26 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          RecordTradePattern(context, profit, trans.deal, deal_time);
         }
 
-      if(deal_type==DEAL_TYPE_BUY)
+      if(closing_buy)
         {
          if(g_grid.buy_levels>0)
             g_grid.buy_levels--;
          if(g_grid.buy_levels==0)
            {
             g_grid.last_buy_price = 0.0;
-            g_grid.base_buy_lot  = 0.0;
+            g_grid.base_buy_lot   = 0.0;
+            g_grid.base_buy_step  = 0.0;
            }
         }
-      else if(deal_type==DEAL_TYPE_SELL)
+      else
         {
          if(g_grid.sell_levels>0)
             g_grid.sell_levels--;
          if(g_grid.sell_levels==0)
            {
             g_grid.last_sell_price = 0.0;
-           g_grid.base_sell_lot   = 0.0;
+            g_grid.base_sell_lot   = 0.0;
+            g_grid.base_sell_step  = 0.0;
            }
         }
 
@@ -1460,6 +1472,10 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
    int      order_count = 0;
    ulong    cluster_tickets[];
    datetime cluster_open_times[];
+   double   cluster_profits[];
+   double   cluster_volumes[];
+   double   cluster_open_prices[];
+   double   cluster_profit_points[];
    ArrayResize(cluster_tickets, 0);
    ArrayResize(cluster_open_times, 0);
 
@@ -1488,8 +1504,14 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
 
        ArrayResize(cluster_tickets, order_count+1);
        ArrayResize(cluster_open_times, order_count+1);
+       ArrayResize(cluster_profits, order_count+1);
+       ArrayResize(cluster_volumes, order_count+1);
+       ArrayResize(cluster_open_prices, order_count+1);
        cluster_tickets[order_count]    = ticket;
        cluster_open_times[order_count] = (datetime)PositionGetInteger(POSITION_TIME);
+       cluster_profits[order_count]    = PositionGetDouble(POSITION_PROFIT);
+       cluster_volumes[order_count]    = volume;
+       cluster_open_prices[order_count]= open_price;
        order_count++;
 
        SActiveTradeContext context;
@@ -1519,6 +1541,25 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
    double avg_price = weighted_price / MathMax(total_volume, 0.0000001);
    double market_price = (direction==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                                         : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(order_count>0)
+     {
+      ArrayResize(cluster_profit_points, order_count);
+      for(int i=0;i<order_count;i++)
+        {
+         double vol    = cluster_volumes[i];
+         double profit = cluster_profits[i];
+         double points = 0.0;
+         if(point_value>0.0 && vol>0.0)
+            points = profit / MathMax(0.0000001, vol * point_value * _Point);
+         else
+           {
+            double price_diff = (direction==POSITION_TYPE_BUY ? (market_price - cluster_open_prices[i])
+                                                              : (cluster_open_prices[i] - market_price));
+            points = price_diff / _Point;
+           }
+         cluster_profit_points[i] = points;
+        }
+     }
    double price_based_points = (direction==POSITION_TYPE_BUY) ? (market_price - avg_price) / _Point
                                                              : (avg_price - market_price) / _Point;
    if(MathAbs(avg_profit_points)<0.0001)
@@ -1572,14 +1613,55 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
            }
         }
 
-      int keep_count = 0;
+      int max_keep = 0;
       if(g_takeProfitState.overlap_enabled && order_count>g_takeProfitState.overlap_threshold)
-        {
-         keep_count = MathMin(order_count-1, g_takeProfitState.overlap_threshold);
-        }
-      int close_count = order_count - keep_count;
+         max_keep = MathMin(order_count-1, g_takeProfitState.overlap_threshold);
 
-      for(int t=0;t<close_count;t++)
+      int max_close = order_count - max_keep;
+      if(max_close<=0)
+         return;
+
+      double per_order_currency = target_profit_currency;
+      double per_order_points   = final_target;
+      double cumulative_profit  = 0.0;
+      double cumulative_points  = 0.0;
+      int close_plan[];
+      ArrayResize(close_plan, 0);
+
+      for(int i=0; i<order_count && ArraySize(close_plan)<max_close; i++)
+        {
+         int index = indexes[i];
+         int next_count = ArraySize(close_plan) + 1;
+         ArrayResize(close_plan, next_count);
+         close_plan[next_count-1] = index;
+         cumulative_profit += cluster_profits[index];
+         double point_contrib = (ArraySize(cluster_profit_points)>index ? cluster_profit_points[index] : price_based_points);
+         cumulative_points += point_contrib;
+
+         bool requirement_met = false;
+         if(per_order_currency>0.0)
+            requirement_met = (cumulative_profit >= per_order_currency * next_count);
+         else
+            requirement_met = (cumulative_points >= per_order_points * next_count);
+
+         if(requirement_met && next_count>0)
+            break;
+        }
+
+      int close_count = ArraySize(close_plan);
+      if(close_count==0 && max_close>0)
+        {
+         ArrayResize(close_plan, 1);
+         close_plan[0] = indexes[0];
+         close_count = 1;
+         cumulative_profit = cluster_profits[indexes[0]];
+         cumulative_points = (ArraySize(cluster_profit_points)>indexes[0] ? cluster_profit_points[indexes[0]] : price_based_points);
+        }
+
+      double executed_profit = 0.0;
+      double executed_points = 0.0;
+      int actual_closed = 0;
+      for(int t=0; t<close_count; t++)
         {
          if(IsStopped())
             break; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
@@ -1588,17 +1670,29 @@ void ManageCluster(const ENUM_POSITION_TYPE direction,const double atr_points) /
             Sleep(10); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
             break;
            }
-         int index = indexes[t];
+         int index = close_plan[t];
          if(index<0 || index>=order_count)
             continue;
          ulong ticket = cluster_tickets[index];
          if(ticket>0)
            {
-            if(!g_trade.PositionClose(ticket))
+            double position_profit = cluster_profits[index];
+            double position_points = (ArraySize(cluster_profit_points)>index ? cluster_profit_points[index] : 0.0);
+            if(g_trade.PositionClose(ticket))
+              {
+               actual_closed++;
+               executed_profit += position_profit;
+               executed_points += position_points;
+              }
+            else
+              {
                LogEvent(StringFormat("Cluster close retry required: %s ticket=%I64u", dir_label, ticket), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
+              }
            }
         }
-      LogEvent(StringFormat("Cluster closed: %s closed=%d kept=%d avgPoints=%.1f target=%.1f avgProfit=%.2f targetProfit=%.2f total=%.2f", dir_label, close_count, keep_count, avg_profit_points, final_target, avg_profit_currency, target_profit_currency, profit_sum)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+
+      int keep_count = MathMax(0, order_count - actual_closed);
+      LogEvent(StringFormat("Cluster closed: %s closed=%d kept=%d avgPoints=%.1f target=%.1f avgProfit=%.2f targetProfit=%.2f total=%.2f realizedProfit=%.2f realizedPoints=%.1f", dir_label, actual_closed, keep_count, avg_profit_points, final_target, avg_profit_currency, target_profit_currency, profit_sum, executed_profit, executed_points)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
      }
   }
 //+------------------------------------------------------------------+
@@ -1688,6 +1782,13 @@ void ManageGrid(const double atr_points)
    double dynamic_step_points = AdaptiveGridSpacing(MathMax(atr_points, g_atrBuffer[0]/_Point));
    dynamic_step_points = NormalizeGridStep(dynamic_step_points);
 
+   double &cluster_step = (pos_type==POSITION_TYPE_BUY ? g_grid.base_buy_step : g_grid.base_sell_step);
+   if(cluster_step<=0.0 || !MathIsValidNumber(cluster_step))
+      cluster_step = dynamic_step_points;
+
+   double step_points = NormalizeGridStep(cluster_step);
+   cluster_step = step_points;
+
    if(last_price<=0.0)
      {
       if(pos_type==POSITION_TYPE_BUY)
@@ -1715,7 +1816,7 @@ void ManageGrid(const double atr_points)
 
    if(pos_type==POSITION_TYPE_BUY)
      {
-      double trigger_price = last_price - dynamic_step_points * _Point;
+      double trigger_price = last_price - step_points * _Point;
       if(current_bid<=trigger_price && g_grid.buy_levels<InpMaxGridLevels)
         {
          double lot = base_lot * MathPow(InpGridMultiplier, g_grid.buy_levels);
@@ -1734,7 +1835,7 @@ void ManageGrid(const double atr_points)
          g_lastGridAttemptTime  = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
          if(g_trade.Buy(lot, _Symbol, 0.0, 0.0, 0.0, "Grid BUY")) // [v3.5 Update] Self-learning, cluster TP, and regression integration
               {
-               LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", g_grid.buy_levels+1, dynamic_step_points));
+               LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", g_grid.buy_levels+1, step_points));
                SPatternCandidate candidate = {POSITION_TYPE_BUY, g_buyDecision.pattern_index, g_buyDecision.estimated_probability};
                candidate.fast_ma       = g_buyDecision.fast_ma;      // [v3.4] Learning-based probability system and adaptive entry
                candidate.slow_ma       = g_buyDecision.slow_ma;      // [v3.4] Learning-based probability system and adaptive entry
@@ -1761,7 +1862,7 @@ void ManageGrid(const double atr_points)
      }
    else if(pos_type==POSITION_TYPE_SELL)
      {
-      double trigger_price = last_price + dynamic_step_points * _Point;
+      double trigger_price = last_price + step_points * _Point;
       if(current_ask>=trigger_price && g_grid.sell_levels<InpMaxGridLevels)
         {
          double lot = base_lot * MathPow(InpGridMultiplier, g_grid.sell_levels);
@@ -1780,7 +1881,7 @@ void ManageGrid(const double atr_points)
          g_lastGridAttemptTime  = now; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
          if(g_trade.Sell(lot, _Symbol, 0.0, 0.0, 0.0, "Grid SELL")) // [v3.5 Update] Self-learning, cluster TP, and regression integration
               {
-               LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", g_grid.sell_levels+1, dynamic_step_points));
+               LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", g_grid.sell_levels+1, step_points));
                SPatternCandidate candidate = {POSITION_TYPE_SELL, g_sellDecision.pattern_index, g_sellDecision.estimated_probability};
                candidate.fast_ma       = g_sellDecision.fast_ma;      // [v3.4] Learning-based probability system and adaptive entry
                candidate.slow_ma       = g_sellDecision.slow_ma;      // [v3.4] Learning-based probability system and adaptive entry
@@ -1834,12 +1935,14 @@ void ResetGridStateIfNeeded()
       g_grid.buy_levels = 0;
       g_grid.last_buy_price = 0.0;
       g_grid.base_buy_lot = 0.0;
+      g_grid.base_buy_step = 0.0;
      }
    if(sell_volume==0.0)
      {
       g_grid.sell_levels = 0;
       g_grid.last_sell_price = 0.0;
       g_grid.base_sell_lot = 0.0;
+      g_grid.base_sell_step = 0.0;
      }
   }
 //+------------------------------------------------------------------+
