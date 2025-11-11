@@ -26,11 +26,13 @@
 #define DEAL_ENTRY_OUT_BY ((ENUM_DEAL_ENTRY)3)
 #endif
 
-const int     MAX_VOLUME_BUFFER      = 512;
-const int     MAX_LEARNING_RECORDS   = 700;
-const int     MIN_LEARNING_ACTIVATION= 100;
-const int     RECENT_METRIC_WINDOW   = 50;
-const int     PATTERN_LOOKBACK_WINDOW= 60;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
+const int     MAX_VOLUME_BUFFER       = 512;
+const int     MAX_LEARNING_RECORDS    = 700;
+const int     MIN_LEARNING_ACTIVATION = 100;
+const ulong   MIN_LEARNING_CLOSED_ULO = (ulong)MIN_LEARNING_ACTIVATION; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+const ulong   REGRESSION_RETRAIN_STEP = 20;   // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+const int     RECENT_METRIC_WINDOW    = 50;
+const int     PATTERN_LOOKBACK_WINDOW = 60;   // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
 enum ENUM_PATTERN_CONSTANTS
   {
@@ -710,7 +712,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
            }
         }
 
-      if(g_stats.closed_trades>=MIN_LEARNING_ACTIVATION && (g_stats.closed_trades % 20)==0)
+      if(g_stats.closed_trades>=MIN_LEARNING_CLOSED_ULO && (g_stats.closed_trades % REGRESSION_RETRAIN_STEP)==0)
          regression_updated = UpdateRegressionModelIfNeeded(); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
      }
 
@@ -1782,12 +1784,16 @@ void ManageGrid(const double atr_points)
    double dynamic_step_points = AdaptiveGridSpacing(MathMax(atr_points, g_atrBuffer[0]/_Point));
    dynamic_step_points = NormalizeGridStep(dynamic_step_points);
 
-   double &cluster_step = (pos_type==POSITION_TYPE_BUY ? g_grid.base_buy_step : g_grid.base_sell_step);
+   double cluster_step = (pos_type==POSITION_TYPE_BUY ? g_grid.base_buy_step : g_grid.base_sell_step);
    if(cluster_step<=0.0 || !MathIsValidNumber(cluster_step))
       cluster_step = dynamic_step_points;
 
    double step_points = NormalizeGridStep(cluster_step);
    cluster_step = step_points;
+   if(pos_type==POSITION_TYPE_BUY)
+      g_grid.base_buy_step = cluster_step;
+   else
+      g_grid.base_sell_step = cluster_step;
 
    if(last_price<=0.0)
      {
@@ -2239,7 +2245,7 @@ void StoreLearningRecord(const SLearningRecord &record,const bool persist)
   g_learningRecords[insert_index] = record;
   g_learningCount++; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
-  bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_ACTIVATION); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+  bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_CLOSED_ULO); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
   bool hit_activation = (g_learningCount==MIN_LEARNING_ACTIVATION); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
    TrimLearningBuffer();
@@ -2465,14 +2471,14 @@ bool UpdateRegressionModelIfNeeded()
    if(!g_regressionModel.initialized)
       InitializeRegressionModel();
 
-   if(g_stats.closed_trades<MIN_LEARNING_ACTIVATION)
+   if(g_stats.closed_trades<MIN_LEARNING_CLOSED_ULO)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
-   if((g_stats.closed_trades % 20)!=0)
+   if((g_stats.closed_trades % REGRESSION_RETRAIN_STEP)!=0)
       return(false); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
    int trades_since_update = (int)g_stats.closed_trades - g_regressionModel.last_update_trades; // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
-   if(trades_since_update < 20)
+   if(trades_since_update < (int)REGRESSION_RETRAIN_STEP)
       return(false);
 
    if(g_regressionModel.last_update_trades== (int)g_stats.closed_trades)
@@ -2822,7 +2828,7 @@ bool ConfirmPatternForEntry(SSignalDecision &decision,const ENUM_POSITION_TYPE d
    bool full_confirmation = (decision.confirmed>=PATTERN_BIT_COUNT);
    double bootstrap_probability = EstimateBootstrapProbability(decision, direction);
    double bootstrap_confidence = EstimateBootstrapConfidence(decision, direction);
-   bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_ACTIVATION);
+   bool learning_active = (g_stats.closed_trades>=MIN_LEARNING_CLOSED_ULO);
 
    if(g_learningCount==0)
      {
