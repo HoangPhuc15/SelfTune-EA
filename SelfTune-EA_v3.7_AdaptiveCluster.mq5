@@ -140,6 +140,8 @@ struct SGridState
    double   anchor_sell_lot;
    double   anchor_buy_price;
    double   anchor_sell_price;
+   double   max_buy_lot;
+   double   max_sell_lot;
    datetime buy_cycle_start;
    datetime sell_cycle_start;
   };
@@ -299,7 +301,7 @@ CTrade        g_trade;
 SIndicatorParams g_params;
 SRiskState       g_risk;
 STradeStats      g_stats;
-SGridState       g_grid = {0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0,0};
+SGridState       g_grid = {0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0,0};
 SPatternStats    g_patternStats[2][PATTERN_COMBINATIONS];
 SPatternModel    g_patternModel[2][PATTERN_COMBINATIONS];
 SActiveTradeContext g_activeTrades[];
@@ -358,7 +360,7 @@ void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const d
 double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
 double      AlignVolumeToBase(const double volume); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 double      NormalizeGridStep(const double raw_points);                        // [v3.7 Update] Grid spacing guard
-bool        CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,double &base_lot,double &last_price); // [v3.7 Update] Grid anchoring sync
+bool        CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,double &base_lot,double &last_price,double &max_lot); // [v3.7 Update] Grid anchoring sync
 void        SyncGridState(); // [v3.7 Update] Grid anchoring sync
 bool        ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,const double base_lot,const double atr_points,const datetime now); // [v3.7 Update] Grid anchoring sync
 bool        RiskChecks();
@@ -629,9 +631,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       g_stats.window_trades++;
       if(deal_type==DEAL_TYPE_BUY)
         {
+        double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
         if(g_grid.buy_levels==0)
           {
-           double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
            g_grid.base_buy_lot  = normalized_entry;
            g_grid.base_buy_step = 0.0;
            g_grid.anchor_buy_lot   = normalized_entry;
@@ -641,14 +643,15 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          g_grid.buy_levels++;
          if(g_grid.buy_levels==1)
             g_grid.buy_cycle_start = deal_time;
+         g_grid.max_buy_lot = AlignVolumeToBase(MathMax(g_grid.max_buy_lot, normalized_entry));
          g_grid.anchor_buy_lot   = AlignVolumeToBase(MathMax(g_grid.anchor_buy_lot, InpBaseLot));
          g_grid.last_buy_price = deal_price;
         }
       else if(deal_type==DEAL_TYPE_SELL)
         {
+        double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
         if(g_grid.sell_levels==0)
           {
-           double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
            g_grid.base_sell_lot  = normalized_entry;
            g_grid.base_sell_step = 0.0;
            g_grid.anchor_sell_lot   = normalized_entry;
@@ -658,6 +661,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          g_grid.sell_levels++;
          if(g_grid.sell_levels==1)
             g_grid.sell_cycle_start = deal_time;
+         g_grid.max_sell_lot = AlignVolumeToBase(MathMax(g_grid.max_sell_lot, normalized_entry));
          g_grid.anchor_sell_lot   = AlignVolumeToBase(MathMax(g_grid.anchor_sell_lot, InpBaseLot));
          g_grid.last_sell_price = deal_price;
         }
@@ -716,13 +720,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
         {
         if(g_grid.buy_levels>0)
            g_grid.buy_levels--;
-        if(g_grid.buy_levels==0)
+         if(g_grid.buy_levels==0)
           {
            g_grid.last_buy_price = 0.0;
            g_grid.base_buy_lot   = 0.0;
            g_grid.base_buy_step  = 0.0;
            g_grid.anchor_buy_lot   = 0.0;
            g_grid.anchor_buy_price = 0.0;
+           g_grid.max_buy_lot      = 0.0;
            g_grid.buy_cycle_start  = 0;
           }
         }
@@ -737,6 +742,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
            g_grid.base_sell_step  = 0.0;
            g_grid.anchor_sell_lot   = 0.0;
            g_grid.anchor_sell_price = 0.0;
+           g_grid.max_sell_lot      = 0.0;
            g_grid.sell_cycle_start  = 0;
           }
         }
@@ -1980,10 +1986,11 @@ double AdaptiveGridSpacing(const double atr_points)
    return(adaptive);
   }
 //+------------------------------------------------------------------+
-bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,double &base_lot,double &last_price) // [v3.7 Update] Grid anchoring sync
+bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,double &base_lot,double &last_price,double &max_lot) // [v3.7 Update] Grid anchoring sync
   {
    levels = 0;
    base_lot = 0.0;
+   max_lot  = 0.0;
    double min_volume = 0.0;
    datetime latest_time = 0;
    double latest_price = last_price;
@@ -2010,6 +2017,8 @@ bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,doub
       levels++;
       if(min_volume==0.0 || volume<min_volume)
          min_volume = volume;
+      if(volume>max_lot)
+         max_lot = volume;
 
       datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
       double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -2041,6 +2050,8 @@ bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,doub
      }
 
    double normalized_base = MathMax(min_volume, InpBaseLot);
+   if(max_lot>0.0)
+      max_lot = MathMax(max_lot, normalized_base);
    base_lot   = NormalizeDouble(normalized_base, volume_digits);
    last_price = latest_price;
    return(true);
@@ -2048,15 +2059,17 @@ bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,doub
 //+------------------------------------------------------------------+
 void SyncGridState() // [v3.7 Update] Grid anchoring sync
   {
-   double buy_base  = g_grid.base_buy_lot;
-   double sell_base = g_grid.base_sell_lot;
-   double buy_price = g_grid.last_buy_price;
+   double buy_base   = g_grid.base_buy_lot;
+   double sell_base  = g_grid.base_sell_lot;
+   double buy_price  = g_grid.last_buy_price;
    double sell_price = g_grid.last_sell_price;
+   double buy_max    = g_grid.max_buy_lot;
+   double sell_max   = g_grid.max_sell_lot;
    int buy_levels = 0;
    int sell_levels = 0;
 
-  bool buy_active  = CollectDirectionMetrics(POSITION_TYPE_BUY, buy_levels, buy_base, buy_price);
-  bool sell_active = CollectDirectionMetrics(POSITION_TYPE_SELL, sell_levels, sell_base, sell_price);
+  bool buy_active  = CollectDirectionMetrics(POSITION_TYPE_BUY, buy_levels, buy_base, buy_price, buy_max);
+  bool sell_active = CollectDirectionMetrics(POSITION_TYPE_SELL, sell_levels, sell_base, sell_price, sell_max);
 
   if(buy_active)
     {
@@ -2064,6 +2077,7 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
      if(g_grid.anchor_buy_lot<=0.0)
         g_grid.anchor_buy_lot = AlignVolumeToBase(MathMax(buy_base, InpBaseLot));
      g_grid.base_buy_lot   = AlignVolumeToBase(MathMax(g_grid.anchor_buy_lot, InpBaseLot));
+     g_grid.max_buy_lot    = AlignVolumeToBase(MathMax(buy_max, g_grid.base_buy_lot));
      if(g_grid.anchor_buy_price<=0.0)
         g_grid.anchor_buy_price = buy_price;
      g_grid.last_buy_price = (buy_price>0.0 ? buy_price : g_grid.anchor_buy_price);
@@ -2076,6 +2090,7 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
      g_grid.base_buy_step   = 0.0;
      g_grid.anchor_buy_lot  = 0.0;
      g_grid.anchor_buy_price= 0.0;
+     g_grid.max_buy_lot     = 0.0;
      g_grid.buy_cycle_start = 0;
     }
 
@@ -2085,6 +2100,7 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
      if(g_grid.anchor_sell_lot<=0.0)
         g_grid.anchor_sell_lot = AlignVolumeToBase(MathMax(sell_base, InpBaseLot));
      g_grid.base_sell_lot  = AlignVolumeToBase(MathMax(g_grid.anchor_sell_lot, InpBaseLot));
+     g_grid.max_sell_lot   = AlignVolumeToBase(MathMax(sell_max, g_grid.base_sell_lot));
      if(g_grid.anchor_sell_price<=0.0)
         g_grid.anchor_sell_price = sell_price;
      g_grid.last_sell_price = (sell_price>0.0 ? sell_price : g_grid.anchor_sell_price);
@@ -2097,6 +2113,7 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
      g_grid.base_sell_step   = 0.0;
      g_grid.anchor_sell_lot  = 0.0;
      g_grid.anchor_sell_price= 0.0;
+     g_grid.max_sell_lot     = 0.0;
      g_grid.sell_cycle_start = 0;
     }
   }
@@ -2133,7 +2150,10 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if(max_lot<=0.0)
       max_lot = min_lot * 100.0;
 
-   double normalized_base = AlignVolumeToBase(MathMax(base_lot, MathMax(InpBaseLot, min_lot)));
+   double anchor_lot = (direction==POSITION_TYPE_BUY ? g_grid.anchor_buy_lot : g_grid.anchor_sell_lot);
+   double cycle_floor = MathMax(anchor_lot, base_lot);
+   cycle_floor = MathMax(cycle_floor, MathMax(InpBaseLot, min_lot));
+   double normalized_base = AlignVolumeToBase(cycle_floor);
 
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2157,9 +2177,42 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if((now - g_lastGridAttemptTime) < 2)
       return(false);
 
-   double lot = normalized_base * MathPow(InpGridMultiplier, levels);
-   lot = MathMin(max_lot, MathMax(min_lot, lot));
-    lot = AlignVolumeToBase(lot);
+   int grid_index = levels;
+   if(grid_index<=0)
+      grid_index = 1;
+   int max_index = MathMax(1, InpMaxGridLevels-1);
+   if(grid_index>max_index)
+      grid_index = max_index;
+
+   double theoretical = normalized_base * MathPow(InpGridMultiplier, grid_index);
+   double last_max = (direction==POSITION_TYPE_BUY ? g_grid.max_buy_lot : g_grid.max_sell_lot);
+   double floor_volume = MathMax(normalized_base, last_max);
+   double target_lot = MathMax(theoretical, floor_volume);
+
+   if(lot_step>0.0)
+     {
+      double steps = target_lot / lot_step;
+      double ceil_steps = MathCeil(steps - 1e-9);
+      if(ceil_steps<1.0)
+         ceil_steps = 1.0;
+      target_lot = ceil_steps * lot_step;
+     }
+
+   int volume_digits = 2;
+   if(lot_step>0.0)
+     {
+      double step = lot_step;
+      volume_digits = 0;
+      while(step<1.0 && volume_digits<8)
+        {
+         step *= 10.0;
+         volume_digits++;
+        }
+     }
+
+   double lot = MathMax(target_lot, floor_volume);
+   lot = MathMax(min_lot, MathMin(max_lot, lot));
+   lot = NormalizeDouble(lot, volume_digits);
 
    g_tradeAttemptPending = true;
    g_lastTradeAttemptTime = now;
@@ -2177,10 +2230,9 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
       return(false);
      }
 
-   if(direction==POSITION_TYPE_BUY)
-      LogEvent(StringFormat("Grid BUY level %d opened (step=%.1f)", levels+1, cluster_step));
-   else
-      LogEvent(StringFormat("Grid SELL level %d opened (step=%.1f)", levels+1, cluster_step));
+   string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
+   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f base=%.2f anchor=%.2f max=%.2f theo=%.4f step=%.1f",
+                         dir_label, levels+1, lot, normalized_base, anchor_lot, last_max, theoretical, cluster_step));
 
    SPatternCandidate candidate;
    if(direction==POSITION_TYPE_BUY)
