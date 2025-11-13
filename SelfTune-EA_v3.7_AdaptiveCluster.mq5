@@ -360,6 +360,7 @@ void        ExecuteSignal(const bool buy_signal, const bool sell_signal, const d
 double      CalculateLotSize(const double risk_points); // [v3.3] Adaptive TakeProfit based on learning data
 double      AlignVolumeToStep(const double volume); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 double      AlignVolumeToBase(const double volume); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+double      NormalizeVolumeToStep(const double volume,const double lot_step,const double min_lot,const double max_lot); // [v3.7 Update] Grid sizing guard
 double      NormalizeGridStep(const double raw_points);                        // [v3.7 Update] Grid spacing guard
 bool        CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,double &base_lot,double &last_price,double &max_lot); // [v3.7 Update] Grid anchoring sync
 void        SyncGridState(); // [v3.7 Update] Grid anchoring sync
@@ -1310,6 +1311,23 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
 //+------------------------------------------------------------------+
 //| Calculate lot size based on risk                                 |
 //+------------------------------------------------------------------+
+double NormalizeVolumeToStep(const double volume,const double lot_step,const double min_lot,const double max_lot) // [v3.7 Update] Grid sizing guard
+  {
+   double aligned = MathMax(volume, min_lot);
+   if(lot_step>0.0)
+     {
+      double steps = MathCeil((aligned - 1e-9) / lot_step);
+      if(steps<1.0)
+         steps = 1.0;
+      aligned = steps * lot_step;
+     }
+
+   if(max_lot>0.0)
+      aligned = MathMin(aligned, max_lot);
+
+   return(MathMax(min_lot, aligned));
+  }
+
 double AlignVolumeToStep(const double volume) // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
   {
    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
@@ -1321,16 +1339,7 @@ double AlignVolumeToStep(const double volume) // [v3.7 Update] BaseLot, Adaptive
    if(max_lot<=0.0)
       max_lot = min_lot * 100.0; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
-   double aligned = MathMax(volume, min_lot);
-   if(lot_step>0.0)
-     {
-      double steps = MathCeil((aligned - 1e-6) / lot_step);
-      if(steps<1.0)
-         steps = 1.0;
-      aligned = steps * lot_step; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-     }
-
-   aligned = MathMax(min_lot, MathMin(max_lot, aligned)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+   double aligned = NormalizeVolumeToStep(volume, lot_step, min_lot, max_lot);
 
    int volume_digits = 2; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    if(lot_step>0.0)
@@ -1351,26 +1360,29 @@ double AlignVolumeToBase(const double volume) // [v3.7 Update] BaseLot, Adaptive
   {
    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double min_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double max_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
    if(min_lot<=0.0)
       min_lot = 0.01;
+   if(max_lot<=0.0)
+      max_lot = min_lot * 100.0;
 
    double base_floor = MathMax(MathMax(volume, InpBaseLot), min_lot);
-   if(InpBaseLot>0.0)
-     {
-      double ratio = base_floor / InpBaseLot;
-      double multiple = MathMax(1.0, MathCeil(ratio - 1e-6));
-      base_floor = multiple * InpBaseLot;
-     }
+   double aligned    = NormalizeVolumeToStep(base_floor, lot_step, min_lot, max_lot);
 
+   int volume_digits = 2;
    if(lot_step>0.0)
      {
-      double steps = MathCeil((base_floor - 1e-6) / lot_step);
-      if(steps<1.0)
-         steps = 1.0;
-      base_floor = steps * lot_step;
+      double step = lot_step;
+      volume_digits = 0;
+      while(volume_digits<8 && step<1.0)
+        {
+         step *= 10.0;
+         volume_digits++;
+        }
      }
 
-   return(AlignVolumeToStep(base_floor));
+   return(NormalizeDouble(aligned, volume_digits));
   }
 
 double NormalizeGridStep(const double raw_points) // [v3.7 Update] Grid spacing guard
@@ -2052,9 +2064,9 @@ bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,doub
         }
      }
 
-   double normalized_base = MathMax(min_volume, InpBaseLot);
+   double normalized_base = AlignVolumeToBase(MathMax(min_volume, InpBaseLot));
    if(max_lot>0.0)
-      max_lot = MathMax(max_lot, normalized_base);
+      max_lot = AlignVolumeToBase(MathMax(max_lot, normalized_base));
    base_lot   = NormalizeDouble(normalized_base, volume_digits);
    last_price = latest_price;
    return(true);
@@ -2156,12 +2168,13 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if(max_lot<=0.0)
       max_lot = min_lot * 100.0;
 
-   double anchor_lot = (direction==POSITION_TYPE_BUY ? g_grid.anchor_buy_lot : g_grid.anchor_sell_lot);
-   if(anchor_lot<=0.0 || !MathIsValidNumber(anchor_lot))
+  double anchor_lot = (direction==POSITION_TYPE_BUY ? g_grid.anchor_buy_lot : g_grid.anchor_sell_lot);
+  if(anchor_lot<=0.0 || !MathIsValidNumber(anchor_lot))
       anchor_lot = base_lot;
+
    double cycle_floor = MathMax(MathMax(anchor_lot, base_lot), MathMax(InpBaseLot, min_lot));
    double normalized_base = AlignVolumeToBase(cycle_floor);
-   double aligned_anchor = AlignVolumeToBase(anchor_lot);
+   double aligned_anchor  = AlignVolumeToBase(anchor_lot);
 
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2186,27 +2199,18 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
       return(false);
 
    int grid_index = levels;
-   if(grid_index<=0)
+   if(grid_index<1)
       grid_index = 1;
    int max_index = MathMax(1, InpMaxGridLevels-1);
    if(grid_index>max_index)
       grid_index = max_index;
 
    double effective_multiplier = (InpGridMultiplier>0.0 ? InpGridMultiplier : 1.0);
-   double theoretical = normalized_base;
-   if(grid_index>0)
-      theoretical = normalized_base * MathPow(effective_multiplier, grid_index);
+   double target_raw   = normalized_base * MathPow(effective_multiplier, grid_index);
+   double previous_raw = normalized_base * MathPow(effective_multiplier, MathMax(grid_index-1, 0));
 
-   double previous_level = normalized_base;
-   if(grid_index>1)
-      previous_level = normalized_base * MathPow(effective_multiplier, grid_index-1);
-
-   double guard_volume = MathMax(previous_level, normalized_base);
-   double target_lot = MathMax(theoretical, guard_volume);
-
-   double aligned_target = AlignVolumeToBase(target_lot);
-   double aligned_floor  = AlignVolumeToBase(guard_volume);
-   double aligned_previous = AlignVolumeToBase(previous_level);
+   double aligned_target   = AlignVolumeToBase(target_raw);
+   double aligned_previous = AlignVolumeToBase(previous_raw);
 
    int volume_digits = 2;
    if(lot_step>0.0)
@@ -2220,7 +2224,7 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
         }
      }
 
-   double lot = MathMax(aligned_target, aligned_floor);
+   double lot = MathMax(aligned_target, aligned_previous);
    lot = MathMax(min_lot, MathMin(max_lot, lot));
    lot = NormalizeDouble(lot, volume_digits);
 
@@ -2242,8 +2246,8 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
 
    string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
    string step_mode = use_dynamic ? "dynamic" : "static";
-   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f base=%.2f anchor=%.2f prev=%.2f theo=%.4f guard=%.2f mult=%.2f step=%.1f mode=%s",
-                         dir_label, levels+1, lot, normalized_base, aligned_anchor, aligned_previous, theoretical, aligned_floor, effective_multiplier, cluster_step, step_mode));
+   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f base=%.3f anchor=%.3f prev=%.3f target=%.3f mult=%.2f step=%.1f mode=%s",
+                         dir_label, levels+1, lot, normalized_base, aligned_anchor, aligned_previous, aligned_target, effective_multiplier, cluster_step, step_mode));
 
    SPatternCandidate candidate;
    if(direction==POSITION_TYPE_BUY)
