@@ -74,7 +74,6 @@ sinput string sep2="--- Grid Control ---";
 input bool              InpUseGrid         = true;           // Enable grid module
 input int               InpMaxGridLevels   = 4;              // Maximum number of grid levels per direction
 input double            InpGridStepPoints  = 350;            // Baseline distance between grid orders (points)
-input double            InpGridMultiplier  = 1.35;           // Lot multiplier across grid levels
 input int               InpDynamicStepStart= 3;              // Orders required before adaptive grid spacing engages
 
 sinput string sep3="--- Adaptive Learning ---";
@@ -2184,7 +2183,6 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
   double normalized_anchor = AlignVolumeToBase(MathMax(anchor_lot, InpBaseLot));
   double cycle_floor = MathMax(MathMax(normalized_anchor, InpBaseLot), min_lot);
   double normalized_base = AlignVolumeToBase(cycle_floor);
-  double aligned_anchor  = normalized_anchor;
 
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2208,20 +2206,6 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if((now - g_lastGridAttemptTime) < 2)
       return(false);
 
-   int grid_index = levels;
-   if(grid_index<1)
-      grid_index = 1;
-   int max_index = MathMax(1, InpMaxGridLevels-1);
-   if(grid_index>max_index)
-      grid_index = max_index;
-
-   double effective_multiplier = (InpGridMultiplier>0.0 ? InpGridMultiplier : 1.0);
-   double target_raw   = normalized_anchor * MathPow(effective_multiplier, grid_index);
-   double previous_raw = normalized_anchor * MathPow(effective_multiplier, MathMax(grid_index-1, 0));
-
-   double aligned_target   = AlignVolumeToBase(target_raw);
-   double aligned_previous = AlignVolumeToBase(previous_raw);
-
    int volume_digits = 2;
    if(lot_step>0.0)
      {
@@ -2230,13 +2214,11 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
       while(step<1.0 && volume_digits<8)
         {
          step *= 10.0;
-         volume_digits++;
-        }
+        volume_digits++;
+       }
      }
 
-   double lot = MathMax(aligned_target, aligned_previous);
-   if(aligned_previous>0.0 && lot<aligned_previous)
-      lot = aligned_previous;
+   double lot = normalized_base;
    lot = MathMax(min_lot, MathMin(max_lot, lot));
    lot = NormalizeDouble(lot, volume_digits);
 
@@ -2258,8 +2240,8 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
 
    string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
    string step_mode = use_dynamic ? "dynamic" : "static";
-   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f base=%.3f anchor=%.3f prev=%.3f target=%.3f mult=%.2f step=%.1f mode=%s",
-                         dir_label, levels+1, lot, normalized_base, aligned_anchor, aligned_previous, aligned_target, effective_multiplier, cluster_step, step_mode));
+   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f anchor=%.3f step=%.1f mode=%s",
+                         dir_label, levels+1, lot, normalized_anchor, cluster_step, step_mode));
 
    SPatternCandidate candidate;
    if(direction==POSITION_TYPE_BUY)
