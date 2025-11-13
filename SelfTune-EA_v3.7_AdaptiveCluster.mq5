@@ -645,10 +645,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          g_grid.buy_levels++;
          if(g_grid.buy_levels==1)
             g_grid.buy_cycle_start = deal_time;
-         g_grid.max_buy_lot = AlignVolumeToBase(MathMax(g_grid.max_buy_lot, normalized_entry));
-         g_grid.anchor_buy_lot   = AlignVolumeToBase(MathMax(g_grid.anchor_buy_lot, InpBaseLot));
-         g_grid.last_buy_price = deal_price;
-        }
+        g_grid.max_buy_lot = AlignVolumeToBase(MathMax(g_grid.max_buy_lot, normalized_entry));
+        double anchor_candidate = AlignVolumeToBase(MathMax(normalized_entry, InpBaseLot));
+        if(g_grid.anchor_buy_lot<=0.0)
+           g_grid.anchor_buy_lot = anchor_candidate;
+        else
+           g_grid.anchor_buy_lot = AlignVolumeToBase(MathMax(MathMin(g_grid.anchor_buy_lot, anchor_candidate), InpBaseLot));
+        g_grid.last_buy_price = deal_price;
+       }
       else if(deal_type==DEAL_TYPE_SELL)
         {
         double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
@@ -663,10 +667,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          g_grid.sell_levels++;
          if(g_grid.sell_levels==1)
             g_grid.sell_cycle_start = deal_time;
-         g_grid.max_sell_lot = AlignVolumeToBase(MathMax(g_grid.max_sell_lot, normalized_entry));
-         g_grid.anchor_sell_lot   = AlignVolumeToBase(MathMax(g_grid.anchor_sell_lot, InpBaseLot));
-         g_grid.last_sell_price = deal_price;
-        }
+        g_grid.max_sell_lot = AlignVolumeToBase(MathMax(g_grid.max_sell_lot, normalized_entry));
+        double anchor_candidate = AlignVolumeToBase(MathMax(normalized_entry, InpBaseLot));
+        if(g_grid.anchor_sell_lot<=0.0)
+           g_grid.anchor_sell_lot = anchor_candidate;
+        else
+           g_grid.anchor_sell_lot = AlignVolumeToBase(MathMax(MathMin(g_grid.anchor_sell_lot, anchor_candidate), InpBaseLot));
+        g_grid.last_sell_price = deal_price;
+       }
 
       ENUM_POSITION_TYPE new_direction = (deal_type==DEAL_TYPE_SELL ? POSITION_TYPE_SELL : POSITION_TYPE_BUY);
       SPatternCandidate candidate;
@@ -2089,8 +2097,9 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
   if(buy_active)
     {
      g_grid.buy_levels = buy_levels;
-     if(g_grid.anchor_buy_lot<=0.0)
-        g_grid.anchor_buy_lot = AlignVolumeToBase(MathMax(buy_base, InpBaseLot));
+     double base_candidate = AlignVolumeToBase(MathMax(buy_base, InpBaseLot));
+     if(g_grid.anchor_buy_lot<=0.0 || base_candidate < g_grid.anchor_buy_lot-0.0000001)
+        g_grid.anchor_buy_lot = base_candidate;
      g_grid.base_buy_lot   = AlignVolumeToBase(MathMax(g_grid.anchor_buy_lot, InpBaseLot));
      g_grid.max_buy_lot    = AlignVolumeToBase(MathMax(buy_max, g_grid.base_buy_lot));
      if(g_grid.anchor_buy_price<=0.0)
@@ -2112,8 +2121,9 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
   if(sell_active)
     {
      g_grid.sell_levels = sell_levels;
-     if(g_grid.anchor_sell_lot<=0.0)
-        g_grid.anchor_sell_lot = AlignVolumeToBase(MathMax(sell_base, InpBaseLot));
+     double base_candidate = AlignVolumeToBase(MathMax(sell_base, InpBaseLot));
+     if(g_grid.anchor_sell_lot<=0.0 || base_candidate < g_grid.anchor_sell_lot-0.0000001)
+        g_grid.anchor_sell_lot = base_candidate;
      g_grid.base_sell_lot  = AlignVolumeToBase(MathMax(g_grid.anchor_sell_lot, InpBaseLot));
      g_grid.max_sell_lot   = AlignVolumeToBase(MathMax(sell_max, g_grid.base_sell_lot));
      if(g_grid.anchor_sell_price<=0.0)
@@ -2170,11 +2180,11 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
 
   double anchor_lot = (direction==POSITION_TYPE_BUY ? g_grid.anchor_buy_lot : g_grid.anchor_sell_lot);
   if(anchor_lot<=0.0 || !MathIsValidNumber(anchor_lot))
-      anchor_lot = base_lot;
-
-   double cycle_floor = MathMax(MathMax(anchor_lot, base_lot), MathMax(InpBaseLot, min_lot));
-   double normalized_base = AlignVolumeToBase(cycle_floor);
-   double aligned_anchor  = AlignVolumeToBase(anchor_lot);
+     anchor_lot = base_lot;
+  double normalized_anchor = AlignVolumeToBase(MathMax(anchor_lot, InpBaseLot));
+  double cycle_floor = MathMax(MathMax(normalized_anchor, InpBaseLot), min_lot);
+  double normalized_base = AlignVolumeToBase(cycle_floor);
+  double aligned_anchor  = normalized_anchor;
 
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2206,8 +2216,8 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
       grid_index = max_index;
 
    double effective_multiplier = (InpGridMultiplier>0.0 ? InpGridMultiplier : 1.0);
-   double target_raw   = normalized_base * MathPow(effective_multiplier, grid_index);
-   double previous_raw = normalized_base * MathPow(effective_multiplier, MathMax(grid_index-1, 0));
+   double target_raw   = normalized_anchor * MathPow(effective_multiplier, grid_index);
+   double previous_raw = normalized_anchor * MathPow(effective_multiplier, MathMax(grid_index-1, 0));
 
    double aligned_target   = AlignVolumeToBase(target_raw);
    double aligned_previous = AlignVolumeToBase(previous_raw);
@@ -2225,6 +2235,8 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
      }
 
    double lot = MathMax(aligned_target, aligned_previous);
+   if(aligned_previous>0.0 && lot<aligned_previous)
+      lot = aligned_previous;
    lot = MathMax(min_lot, MathMin(max_lot, lot));
    lot = NormalizeDouble(lot, volume_digits);
 
