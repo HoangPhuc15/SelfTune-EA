@@ -2177,12 +2177,14 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if(max_lot<=0.0)
       max_lot = min_lot * 100.0;
 
-  double anchor_lot = (direction==POSITION_TYPE_BUY ? g_grid.anchor_buy_lot : g_grid.anchor_sell_lot);
-  if(anchor_lot<=0.0 || !MathIsValidNumber(anchor_lot))
-     anchor_lot = base_lot;
-  double normalized_anchor = AlignVolumeToBase(MathMax(anchor_lot, InpBaseLot));
-  double cycle_floor = MathMax(MathMax(normalized_anchor, InpBaseLot), min_lot);
-  double normalized_base = AlignVolumeToBase(cycle_floor);
+   double anchor_lot = (direction==POSITION_TYPE_BUY ? g_grid.anchor_buy_lot : g_grid.anchor_sell_lot);
+   double base_floor = AlignVolumeToBase(MathMax(InpBaseLot, min_lot));
+   if(anchor_lot<=0.0 || !MathIsValidNumber(anchor_lot))
+      anchor_lot = base_floor;
+   double normalized_anchor = AlignVolumeToBase(MathMax(anchor_lot, base_floor));
+   double normalized_base   = AlignVolumeToBase(MathMax(base_lot, base_floor));
+   double cycle_floor       = MathMax(base_floor, MathMin(normalized_base, normalized_anchor));
+   double normalized_lot    = AlignVolumeToBase(cycle_floor);
 
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2218,7 +2220,7 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
        }
      }
 
-   double lot = normalized_base;
+   double lot = normalized_lot;
    lot = MathMax(min_lot, MathMin(max_lot, lot));
    lot = NormalizeDouble(lot, volume_digits);
 
@@ -2240,8 +2242,8 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
 
    string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
    string step_mode = use_dynamic ? "dynamic" : "static";
-   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f anchor=%.3f step=%.1f mode=%s",
-                         dir_label, levels+1, lot, normalized_anchor, cluster_step, step_mode));
+   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f anchor=%.3f base=%.3f floor=%.3f step=%.1f mode=%s",
+                         dir_label, levels+1, lot, normalized_anchor, normalized_base, base_floor, cluster_step, step_mode));
 
    SPatternCandidate candidate;
    if(direction==POSITION_TYPE_BUY)
