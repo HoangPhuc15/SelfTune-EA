@@ -2166,19 +2166,21 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if(grid_index>max_index)
       grid_index = max_index;
 
-   double theoretical = normalized_base * MathPow(InpGridMultiplier, grid_index);
-   double last_max = (direction==POSITION_TYPE_BUY ? g_grid.max_buy_lot : g_grid.max_sell_lot);
-   double floor_volume = MathMax(normalized_base, last_max);
-   double target_lot = MathMax(theoretical, floor_volume);
+   double effective_multiplier = (InpGridMultiplier>0.0 ? InpGridMultiplier : 1.0);
+   double theoretical = normalized_base * MathPow(effective_multiplier, grid_index);
+   double previous_level = normalized_base;
+   if(grid_index>1)
+      previous_level = normalized_base * MathPow(effective_multiplier, grid_index-1);
 
-   if(lot_step>0.0)
-     {
-      double steps = target_lot / lot_step;
-      double ceil_steps = MathCeil(steps - 1e-9);
-      if(ceil_steps<1.0)
-         ceil_steps = 1.0;
-      target_lot = ceil_steps * lot_step;
-     }
+   double guard_volume = MathMax(previous_level, normalized_base);
+   double last_max = (direction==POSITION_TYPE_BUY ? g_grid.max_buy_lot : g_grid.max_sell_lot);
+   if(last_max>0.0)
+      guard_volume = MathMax(guard_volume, MathMin(last_max, theoretical));
+
+   double target_lot = MathMax(theoretical, guard_volume);
+
+   double aligned_target = AlignVolumeToBase(target_lot);
+   double aligned_floor  = AlignVolumeToBase(guard_volume);
 
    int volume_digits = 2;
    if(lot_step>0.0)
@@ -2192,7 +2194,7 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
         }
      }
 
-   double lot = MathMax(target_lot, floor_volume);
+   double lot = MathMax(aligned_target, aligned_floor);
    lot = MathMax(min_lot, MathMin(max_lot, lot));
    lot = NormalizeDouble(lot, volume_digits);
 
@@ -2213,8 +2215,8 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
      }
 
    string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
-   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f base=%.2f anchor=%.2f max=%.2f theo=%.4f step=%.1f",
-                         dir_label, levels+1, lot, normalized_base, anchor_lot, last_max, theoretical, cluster_step));
+   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f base=%.2f anchor=%.2f max=%.2f theo=%.4f guard=%.2f mult=%.2f step=%.1f",
+                         dir_label, levels+1, lot, normalized_base, anchor_lot, last_max, theoretical, aligned_floor, effective_multiplier, cluster_step));
 
    SPatternCandidate candidate;
    if(direction==POSITION_TYPE_BUY)
