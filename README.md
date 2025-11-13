@@ -22,7 +22,7 @@ The EA is designed for **Every Tick** backtests and live trading on **hedging** 
 
 1. **Signal Detection** – Indicators update once per bar. If ≥3 components agree, a candidate trade is formed with a unique pattern mask.
 2. **Probability & Lot Sizing** – The regression model projects win probability and confidence. Lots are computed from risk settings, clamped to `InpBaseLot`, and scaled by confidence when applicable.
-3. **Trade Management** – The EA enters trades sequentially per direction. Grid recoveries respect the stored anchor lot/price and the configured step. No hard stop-losses are placed; exits rely on virtual cluster profit targets.
+3. **Trade Management** – The EA enters trades sequentially per direction. Grid recoveries respect the stored anchor lot/price and the configured step. You can defer adaptive spacing until a basket builds up by adjusting `InpDynamicStepStart`; early levels use the static `InpGridStepPoints`, while later ones switch to the adaptive ATR/indicator spacing. No hard stop-losses are placed; exits rely on virtual cluster profit targets.
 4. **Cluster Handling** – Basket profit is monitored on every tick. When the adaptive target is hit, the EA closes the oldest orders first, optionally leaving overlap positions to continue recovery.
 5. **Learning Cycle** – On every trade close, the EA appends trade data to the dataset. After 100 closed trades, it activates learning, retraining regression coefficients every 20 trades.
 
