@@ -1,67 +1,49 @@
-# Expert Advisor Readme
+# SelfTune-EA v3.7 Adaptive Cluster
 
-## Robot_ma_ifr Expert Advisor
+> // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
-### Overview
-The `Robot_ma_ifr` Expert Advisor is designed for automated trading on the MetaTrader 5 platform. It combines two popular technical indicators, Moving Averages (MM) and the Relative Strength Index (IFR), to generate buy and sell signals based on user-defined strategies.
+SelfTune-EA v3.7 is a probabilistic, self-learning grid Expert Advisor for MetaTrader 5. It combines multi-indicator pattern detection, adaptive regression-based probability scoring, and a virtual take-profit cluster manager that can close baskets partially while respecting a configurable base lot size.
 
-### Parameters
+The EA is designed for **Every Tick** backtests and live trading on **hedging** accounts. It automatically retrains on recent trade history, adjusts recovery behavior based on model confidence, and enforces stability safeguards (file I/O throttling, trade context locks, Sleep(10) inside loops).
 
-1. **Estratégia de Entrada (Entry Strategy)**
-   - Options: APENAS_MM (Only Moving Averages), APENAS_IFR (Only Relative Strength Index), MM_E_IFR (Moving Averages and Relative Strength Index)
-   - Description: Select the strategy for generating entry signals.
+---
 
-2. **Médias Móveis (Moving Averages)**
-   - `mm_rapida_periodo`: Period of the fast moving average.
-   - `mm_lenta_periodo`: Period of the slow moving average.
-   - `mm_tempo_grafico`: Timeframe for moving averages.
-   - `mm_method`: Method for calculating moving averages.
-   - `mm_preco`: Applied price for moving averages.
-   
-3. **IFR (Relative Strength Index)**
-   - `ifr_periodo`: Period of the Relative Strength Index.
-   - `ifr_tempo_grafico`: Timeframe for the Relative Strength Index.
-   - `ifr_preco`: Applied price for the Relative Strength Index.
-   - `ifr_sobrecompra`: Overbought level for the Relative Strength Index.
-   - `ifr_sobrevenda`: Oversold level for the Relative Strength Index.
-   
-4. **Operação (Operation)**
-   - `num_lots`: Number of lots to trade.
-   - `TK`: Take Profit distance in points.
-   - `SL`: Stop Loss distance in points.
+## Quick Start
 
-5. **Hora Limite para Fechar Operações (Closing Time)**
-   - `hora_limite_fecha_op`: Time to close open positions.
+1. Copy `SelfTune-EA_v3.7_AdaptiveCluster.mq5` to the `MQL5/Experts` folder of your MetaTrader 5 data directory.
+2. Compile the EA in MetaEditor (F7).
+3. Attach the EA to a symbol chart using the **Every Tick** modelling mode for backtests.
+4. Set account type to hedging and enable algorithmic trading.
+5. Review and adjust the EA inputs directly in MetaTrader to match your risk profile before running tests or going live.
 
-### Indicators and Functions
+---
 
-- **Indicators**
-  - Two moving averages and the Relative Strength Index are used to generate trading signals.
-  
-- **Functions**
-  - `desenhaLinhaVertical`: Draws a vertical line on the chart.
-  - `compraAMercado`: Places a market buy order.
-  - `vendaAMercado`: Places a market sell order.
-  - `fechaCompra`: Closes a buy position.
-  - `fechaVenda`: Closes a sell position.
-  - `temosNovaVela`: Checks if a new candle has started.
+## Trading Workflow
 
-### Usage
+1. **Signal Detection** – Indicators update once per bar. If ≥3 components agree, a candidate trade is formed with a unique pattern mask.
+2. **Probability & Lot Sizing** – The regression model projects win probability and confidence. Lots are computed from risk settings, clamped to `InpBaseLot`, and scaled by confidence when applicable.
+3. **Trade Management** – The EA enters trades sequentially per direction. Grid recoveries respect the stored anchor lot/price and the configured step. You can defer adaptive spacing until a basket builds up by adjusting `InpDynamicStepStart`; early levels use the static `InpGridStepPoints`, while later ones switch to the adaptive ATR/indicator spacing. No hard stop-losses are placed; exits rely on virtual cluster profit targets.
+4. **Cluster Handling** – Basket profit is monitored on every tick. When the adaptive target is hit, the EA closes the oldest orders first, optionally leaving overlap positions to continue recovery.
+5. **Learning Cycle** – On every trade close, the EA appends trade data to the dataset. After 100 closed trades, it activates learning, retraining regression coefficients every 20 trades.
 
-1. **Installation**
-   - Copy the `Robot_ma_ifr.mq5` file to the `Experts` folder of your MetaTrader 5 installation.
+---
 
-2. **Configuration**
-   - Open the MetaEditor, compile the `Robot_ma_ifr.mq5` file, and attach the EA to a chart in MetaTrader 5.
-   - Configure the parameters based on your preferred trading strategy.
+## Files & Logs
 
-3. **Execution**
-   - The EA will execute buy and sell orders based on the selected strategy and parameters.
+- **Learning dataset** – Stored under `MQL5/Files` with the header listed above. Contains up to 700 of the most recent closed trades.
+- **Logs** – MetaTrader's Experts log will contain status messages (learning updates, adaptive TP changes, grid actions). Enable `InpVerboseLearning` for coefficient dumps.
 
-### Disclaimer
+---
 
-Trading involves risk, and it's important to thoroughly test any strategy before using it in a live trading environment. The `Robot_ma_ifr` Expert Advisor is provided as-is, and the user is responsible for any financial losses incurred through its use.
+## Best Practices
 
-### Author Information
+- **Backtest in Every Tick mode** to verify stability and performance before deploying live.
+- **Start with low risk** and verify that lot scaling remains within broker constraints.
+- **Monitor the dataset file size**; if you delete it, the EA will rebuild the learning history from scratch.
+- **Use VPS hosting** if running 24/7 to ensure low latency and avoid interruptions during learning updates.
 
-- **Author:** Douglas Volcato
+---
+
+## Disclaimer
+
+Automated trading carries significant risk. Past performance does not guarantee future results. Test thoroughly on demo accounts before trading live capital.
