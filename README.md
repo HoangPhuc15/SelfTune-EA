@@ -45,8 +45,7 @@ The EA exposes its configuration through grouped input sections. Each parameter 
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `InpRiskPerTrade` | `1.0` | Percentage of current equity risked on a fresh trade when no fixed lot is supplied. Drives the ATR-based position sizing logic. |
-| `InpInitialLot` | `0.0` | Optional fixed lot baseline. When set > 0, it overrides risk-based sizing for the first order of a direction. |
+| `InpRiskPerTrade` | `1.0` | Percentage of current equity risked on a fresh trade. Drives the ATR-based position sizing logic. |
 | `InpBaseLot` | `0.01` | **Minimum starting lot** per cycle. All initial trades and grid recoveries are clamped to this floor even after confidence scaling. |
 | `InpMaxDrawdown` | `20.0` | Equity drawdown percentage that pauses trading for the remainder of the session. |
 | `InpDailyLoss` | `5.0` | Daily loss threshold; once breached, no new positions are opened until the next trading day. |

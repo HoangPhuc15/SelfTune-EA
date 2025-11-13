@@ -58,7 +58,6 @@ input double            InpVolumeMultiplier= 1.20;           // Volume multiplie
 
 sinput string sep1="--- Risk Management ---";
 input double            InpRiskPerTrade    = 1.0;            // Risk per trade (% of equity)
-input double            InpInitialLot      = 0.0;            // Optional fixed baseline lot (0 = risk based)
 input double            InpBaseLot         = 0.01;           // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability - Minimum base lot for the first trade
 input double            InpMaxDrawdown     = 20.0;           // Max equity drawdown before halt (%)
 input double            InpDailyLoss       = 5.0;            // Max daily loss before halt (%)
@@ -1175,7 +1174,7 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
      {
       base_lot = enforced_base;
       if(InpVerboseLogging)
-         LogEvent(StringFormat("Initial lot aligned to base minimum %.2f", base_lot));
+         LogEvent(StringFormat("Base lot aligned to minimum %.2f", base_lot));
      }
 
    base_lot = AlignVolumeToBase(base_lot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
@@ -1444,27 +1443,10 @@ double CalculateLotSize(const double risk_points) // [v3.3] Adaptive TakeProfit 
   lot = MathMax(min_lot, MathMin(max_lot, lot));
   lot = NormalizeDouble(lot, volume_digits);
 
-  bool initial_override_used = false;
-  if(InpInitialLot>0.0)
-    {
-      double override_lot = AlignVolumeToBase(InpInitialLot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-      if(InpVerboseLogging && risk_lot>0.0 && override_lot>risk_lot)
-      LogEvent(StringFormat("Initial lot %.2f exceeds risk-based %.2f; override applied", override_lot, risk_lot), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
-
-      if(risk_lot<=0.0 || override_lot>lot)
-        {
-         lot = override_lot;
-         initial_override_used = true;
-        }
-    }
-
   lot = AlignVolumeToBase(MathMax(lot, base_floor)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
   if(InpVerboseLogging && base_override_used)
      LogEvent(StringFormat("Base lot enforced at %.2f lots", lot), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-
-  if(InpVerboseLogging && initial_override_used)
-     LogEvent(StringFormat("Initial lot override applied (%.2f lots)", lot), true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
 
   return(lot);
   }
