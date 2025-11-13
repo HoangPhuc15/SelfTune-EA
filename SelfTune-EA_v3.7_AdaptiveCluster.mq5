@@ -495,7 +495,7 @@ int OnInit()
    g_trade.SetExpertMagicNumber((uint)MathRand());
 
    double effective_base_lot = AlignVolumeToBase(MathMax(InpBaseLot, 0.0)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-   LogEvent(StringFormat("Base lot initialized at %.2f lots", effective_base_lot), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+   LogEvent(StringFormat("Lot initialized: %.2f", effective_base_lot), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    LogEvent("EA initialized", true); // [v3.6 Stability Fix] Improved tick handling, learning I/O, and context safety
    g_initComplete = true; // [v3.1] enable post-init learning cycles
    return(INIT_SUCCEEDED);
@@ -632,7 +632,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
       g_stats.window_trades++;
       if(deal_type==DEAL_TYPE_BUY)
         {
-        double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+        double normalized_entry = AlignVolumeToBase(InpBaseLot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
         if(g_grid.buy_levels==0)
           {
            g_grid.base_buy_lot  = normalized_entry;
@@ -644,17 +644,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          g_grid.buy_levels++;
          if(g_grid.buy_levels==1)
             g_grid.buy_cycle_start = deal_time;
-        g_grid.max_buy_lot = AlignVolumeToBase(MathMax(g_grid.max_buy_lot, normalized_entry));
-        double anchor_candidate = AlignVolumeToBase(MathMax(normalized_entry, InpBaseLot));
-        if(g_grid.anchor_buy_lot<=0.0)
-           g_grid.anchor_buy_lot = anchor_candidate;
-        else
-           g_grid.anchor_buy_lot = AlignVolumeToBase(MathMax(MathMin(g_grid.anchor_buy_lot, anchor_candidate), InpBaseLot));
+        g_grid.max_buy_lot = normalized_entry;
+        g_grid.anchor_buy_lot = normalized_entry;
         g_grid.last_buy_price = deal_price;
        }
       else if(deal_type==DEAL_TYPE_SELL)
-        {
-        double normalized_entry = AlignVolumeToBase(MathMax(deal_volume, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+       {
+        double normalized_entry = AlignVolumeToBase(InpBaseLot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
         if(g_grid.sell_levels==0)
           {
            g_grid.base_sell_lot  = normalized_entry;
@@ -666,12 +662,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &
          g_grid.sell_levels++;
          if(g_grid.sell_levels==1)
             g_grid.sell_cycle_start = deal_time;
-        g_grid.max_sell_lot = AlignVolumeToBase(MathMax(g_grid.max_sell_lot, normalized_entry));
-        double anchor_candidate = AlignVolumeToBase(MathMax(normalized_entry, InpBaseLot));
-        if(g_grid.anchor_sell_lot<=0.0)
-           g_grid.anchor_sell_lot = anchor_candidate;
-        else
-           g_grid.anchor_sell_lot = AlignVolumeToBase(MathMax(MathMin(g_grid.anchor_sell_lot, anchor_candidate), InpBaseLot));
+        g_grid.max_sell_lot = normalized_entry;
+        g_grid.anchor_sell_lot = normalized_entry;
         g_grid.last_sell_price = deal_price;
        }
 
@@ -1169,25 +1161,9 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
    double atr_floor = atr_points * InpATRMultiplierTP; // [v3.5 Update] Self-learning, cluster TP, and regression integration
    double risk_points = MathMax(take_profit_points, MathMax(atr_floor, 10.0)); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
-   double base_lot = CalculateLotSize(risk_points); // [v3.3] Adaptive TakeProfit based on learning data
+   double base_lot = AlignVolumeToBase(InpBaseLot);
    if(base_lot<=0.0)
       return;
-
-   double min_volume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double step_volume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(min_volume<=0.0)
-      min_volume = (step_volume>0.0 ? step_volume : 0.01);
-   double enforced_base = AlignVolumeToBase(MathMax(InpBaseLot, min_volume)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-
-   bool has_symbol_position = PositionSelect(_Symbol);
-   if(!has_symbol_position && base_lot>enforced_base+0.0000001)
-     {
-      base_lot = enforced_base;
-      if(InpVerboseLogging)
-         LogEvent(StringFormat("Base lot aligned to minimum %.2f", base_lot));
-     }
-
-   base_lot = AlignVolumeToBase(base_lot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
 
    double buy_lot = base_lot;
    double sell_lot = base_lot;
@@ -1202,17 +1178,9 @@ void ExecuteSignal(const bool buy_signal, const bool sell_signal, const double a
       sell_allowed = PredictTradeOutcome(g_sellDecision, POSITION_TYPE_SELL, base_lot, sell_lot); // [v3.5 Update] Self-learning, cluster TP, and regression integration
 
    if(buy_allowed)
-     {
-      if(open_buy_positions==0)
-         buy_lot = enforced_base;
-      buy_lot = AlignVolumeToBase(MathMax(buy_lot, enforced_base));
-     }
+      buy_lot = base_lot;
    if(sell_allowed)
-     {
-      if(open_sell_positions==0)
-         sell_lot = enforced_base;
-      sell_lot = AlignVolumeToBase(MathMax(sell_lot, enforced_base));
-     }
+      sell_lot = base_lot;
 
   if(buy_allowed && open_sell_positions>0)
      buy_allowed = false;
@@ -1374,7 +1342,7 @@ double AlignVolumeToBase(const double volume) // [v3.7 Update] BaseLot, Adaptive
    if(max_lot<=0.0)
       max_lot = min_lot * 100.0;
 
-   double base_floor = MathMax(MathMax(volume, InpBaseLot), min_lot);
+   double base_floor = MathMax(InpBaseLot, min_lot);
    double aligned    = NormalizeVolumeToStep(base_floor, lot_step, min_lot, max_lot);
 
    int volume_digits = 2;
@@ -1421,74 +1389,11 @@ int SafeClosedTradeCount() // [v3.7 Update] BaseLot, AdaptiveClusterTP, Learning
 
 double CalculateLotSize(const double risk_points) // [v3.3] Adaptive TakeProfit based on learning data
   {
-   double lot_step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double max_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   int    volume_digits = 0;
-
-   if(min_lot<=0.0)
-     {
-      if(lot_step>0.0)
-         min_lot = lot_step;
-      else
-         min_lot = 0.01;
-     }
-   if(max_lot<=0.0)
-      max_lot = min_lot * 100.0;
-   if(volume_digits<0)
-      volume_digits = 0;
-   if(volume_digits==0 && lot_step>0.0)
-     {
-      double step = lot_step;
-      while(step<1.0 && volume_digits<8)
-        {
-         step*=10.0;
-         volume_digits++;
-        }
-     }
-   if(volume_digits==0 && lot_step<=0.0)
-      volume_digits = 2;
-
-   double equity      = AccountInfoDouble(ACCOUNT_EQUITY);
-   double risk_amount = equity * InpRiskPerTrade / 100.0;
-   double tick_value  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tick_size   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-
-   double point_value = 0.0;
-   if(tick_value>0.0 && tick_size>0.0)
-      point_value = tick_value / tick_size;
-
-  double risk_lot = 0.0;
-  if(risk_points>0.0 && point_value>0.0)
-      risk_lot = risk_amount / (risk_points * _Point * point_value); // [v3.3] Adaptive TakeProfit based on learning data
-
-  if(lot_step>0.0 && risk_lot>0.0)
-      risk_lot = MathFloor(risk_lot/lot_step) * lot_step;
-
-  double base_floor = AlignVolumeToBase(MathMax(InpBaseLot, min_lot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-  double lot = risk_lot;
-  bool base_override_used = false; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-  if(lot<=0.0 || !MathIsValidNumber(lot))
-    {
-     lot = base_floor;
-     base_override_used = true; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-    }
-
-  if(lot < base_floor - 0.0000001)
-    {
-     lot = base_floor;
-     base_override_used = true; // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-    }
-
-  lot = MathMax(min_lot, MathMin(max_lot, lot));
-  lot = NormalizeDouble(lot, volume_digits);
-
-  lot = AlignVolumeToBase(MathMax(lot, base_floor)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-
-  if(InpVerboseLogging && base_override_used)
-     LogEvent(StringFormat("Base lot enforced at %.2f lots", lot), true); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-
-  return(lot);
+   (void)risk_points;
+   double aligned_base = AlignVolumeToBase(InpBaseLot);
+   if(InpVerboseLogging)
+      LogEvent(StringFormat("Lot initialized: %.2f", aligned_base));
+   return(aligned_base);
   }
 //+------------------------------------------------------------------+
 //| Perform risk guard checks                                        |
@@ -1926,13 +1831,14 @@ int EvaluatePatternProbability(const bool cond_ma,const bool cond_rsi,const bool
 //+------------------------------------------------------------------+
 bool PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYPE direction,const double base_lot,double &adjusted_lot) // [v3.5 Update] Self-learning, cluster TP, and regression integration
   {
+   (void)base_lot;
    //--- enforce the 3-of-4 confirmation rule before looking at probabilities
    if(decision.confirmations_required>0 && decision.confirmed<decision.confirmations_required)
      {
       LogEvent("Trade skipped: insufficient indicator confirmations");
       return(false);
      }
-   double normalized_base = AlignVolumeToBase(MathMax(base_lot, InpBaseLot)); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
+   double normalized_base = AlignVolumeToBase(InpBaseLot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
    double probability = decision.estimated_probability;
    double bootstrap_probability = EstimateBootstrapProbability(decision, direction); // [v3.5 Update] Self-learning, cluster TP, and regression integration
    if(probability<bootstrap_probability)
@@ -1967,19 +1873,7 @@ bool PredictTradeOutcome(const SSignalDecision &decision,const ENUM_POSITION_TYP
       return(false);
      }
 
-   double scale = probability / InpProbabilityThreshold;
-   scale = MathMax(InpConfidenceFloor, MathMin(1.0, scale));
-   double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double lot_value = MathMax(normalized_base * scale, min_lot); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-   if(lot_step>0.0)
-      lot_value = MathFloor(lot_value/lot_step)*lot_step;
-   lot_value = MathMax(lot_value, min_lot);
-   double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   if(lot_value>max_lot)
-      lot_value = max_lot;
-   adjusted_lot = AlignVolumeToBase(lot_value); // [v3.7 Update] BaseLot, AdaptiveClusterTP, LearningFix, Regression, Stability
-   LogEvent(StringFormat("Lot adjusted by probability %.2f -> scale %.2f", probability, scale));
+   adjusted_lot = normalized_base;
    return(true);
   }
 //+------------------------------------------------------------------+
@@ -2013,7 +1907,6 @@ bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,doub
    levels = 0;
    base_lot = 0.0;
    max_lot  = 0.0;
-   double min_volume = 0.0;
    datetime latest_time = 0;
    double latest_price = last_price;
 
@@ -2037,10 +1930,6 @@ bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,doub
          continue;
 
       levels++;
-      if(min_volume==0.0 || volume<min_volume)
-         min_volume = volume;
-      if(volume>max_lot)
-         max_lot = volume;
 
       datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
       double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -2071,9 +1960,8 @@ bool CollectDirectionMetrics(const ENUM_POSITION_TYPE direction,int &levels,doub
         }
      }
 
-   double normalized_base = AlignVolumeToBase(MathMax(min_volume, InpBaseLot));
-   if(max_lot>0.0)
-      max_lot = AlignVolumeToBase(MathMax(max_lot, normalized_base));
+   double normalized_base = AlignVolumeToBase(InpBaseLot);
+   max_lot = normalized_base;
    base_lot   = NormalizeDouble(normalized_base, volume_digits);
    last_price = latest_price;
    return(true);
@@ -2095,12 +1983,11 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
 
   if(buy_active)
     {
-     g_grid.buy_levels = buy_levels;
-     double base_candidate = AlignVolumeToBase(MathMax(buy_base, InpBaseLot));
-     if(g_grid.anchor_buy_lot<=0.0 || base_candidate < g_grid.anchor_buy_lot-0.0000001)
-        g_grid.anchor_buy_lot = base_candidate;
-     g_grid.base_buy_lot   = AlignVolumeToBase(MathMax(g_grid.anchor_buy_lot, InpBaseLot));
-     g_grid.max_buy_lot    = AlignVolumeToBase(MathMax(buy_max, g_grid.base_buy_lot));
+     double aligned_base = AlignVolumeToBase(InpBaseLot);
+     g_grid.buy_levels      = buy_levels;
+     g_grid.anchor_buy_lot  = aligned_base;
+     g_grid.base_buy_lot    = aligned_base;
+     g_grid.max_buy_lot     = aligned_base;
      if(g_grid.anchor_buy_price<=0.0)
         g_grid.anchor_buy_price = buy_price;
      g_grid.last_buy_price = (buy_price>0.0 ? buy_price : g_grid.anchor_buy_price);
@@ -2119,12 +2006,11 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
 
   if(sell_active)
     {
-     g_grid.sell_levels = sell_levels;
-     double base_candidate = AlignVolumeToBase(MathMax(sell_base, InpBaseLot));
-     if(g_grid.anchor_sell_lot<=0.0 || base_candidate < g_grid.anchor_sell_lot-0.0000001)
-        g_grid.anchor_sell_lot = base_candidate;
-     g_grid.base_sell_lot  = AlignVolumeToBase(MathMax(g_grid.anchor_sell_lot, InpBaseLot));
-     g_grid.max_sell_lot   = AlignVolumeToBase(MathMax(sell_max, g_grid.base_sell_lot));
+     double aligned_base = AlignVolumeToBase(InpBaseLot);
+     g_grid.sell_levels      = sell_levels;
+     g_grid.anchor_sell_lot  = aligned_base;
+     g_grid.base_sell_lot    = aligned_base;
+     g_grid.max_sell_lot     = aligned_base;
      if(g_grid.anchor_sell_price<=0.0)
         g_grid.anchor_sell_price = sell_price;
      g_grid.last_sell_price = (sell_price>0.0 ? sell_price : g_grid.anchor_sell_price);
@@ -2144,7 +2030,8 @@ void SyncGridState() // [v3.7 Update] Grid anchoring sync
 //+------------------------------------------------------------------+
 bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,const double base_lot,const double atr_points,const datetime now) // [v3.7 Update] Grid anchoring sync
   {
-   if(levels<=0 || base_lot<=0.0)
+   (void)base_lot;
+   if(levels<=0)
       return(false);
 
    double baseline_step = NormalizeGridStep(InpGridStepPoints);
@@ -2169,23 +2056,6 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if(last_price<=0.0)
       return(false);
 
-   double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double min_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double max_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   if(min_lot<=0.0)
-      min_lot = (lot_step>0.0 ? lot_step : 0.01);
-   if(max_lot<=0.0)
-      max_lot = min_lot * 100.0;
-
-   double anchor_lot = (direction==POSITION_TYPE_BUY ? g_grid.anchor_buy_lot : g_grid.anchor_sell_lot);
-   double base_floor = AlignVolumeToBase(MathMax(InpBaseLot, min_lot));
-   if(anchor_lot<=0.0 || !MathIsValidNumber(anchor_lot))
-      anchor_lot = base_floor;
-   double normalized_anchor = AlignVolumeToBase(MathMax(anchor_lot, base_floor));
-   double normalized_base   = AlignVolumeToBase(MathMax(base_lot, base_floor));
-   double cycle_floor       = MathMax(base_floor, MathMin(normalized_base, normalized_anchor));
-   double normalized_lot    = AlignVolumeToBase(cycle_floor);
-
    double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
@@ -2208,21 +2078,7 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
    if((now - g_lastGridAttemptTime) < 2)
       return(false);
 
-   int volume_digits = 2;
-   if(lot_step>0.0)
-     {
-      double step = lot_step;
-      volume_digits = 0;
-      while(step<1.0 && volume_digits<8)
-        {
-         step *= 10.0;
-        volume_digits++;
-       }
-     }
-
-   double lot = normalized_lot;
-   lot = MathMax(min_lot, MathMin(max_lot, lot));
-   lot = NormalizeDouble(lot, volume_digits);
+   double lot = AlignVolumeToBase(InpBaseLot);
 
    g_tradeAttemptPending = true;
    g_lastTradeAttemptTime = now;
@@ -2242,8 +2098,9 @@ bool ProcessGridDirection(const ENUM_POSITION_TYPE direction,const int levels,co
 
    string dir_label = (direction==POSITION_TYPE_BUY ? "BUY" : "SELL");
    string step_mode = use_dynamic ? "dynamic" : "static";
-   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f anchor=%.3f base=%.3f floor=%.3f step=%.1f mode=%s",
-                         dir_label, levels+1, lot, normalized_anchor, normalized_base, base_floor, cluster_step, step_mode));
+   LogEvent(StringFormat("Grid #%d -> %.2f lot", levels+1, lot), true);
+   LogEvent(StringFormat("Grid %s level %d opened lot=%.2f step=%.1f mode=%s",
+                         dir_label, levels+1, lot, cluster_step, step_mode));
 
    SPatternCandidate candidate;
    if(direction==POSITION_TYPE_BUY)
