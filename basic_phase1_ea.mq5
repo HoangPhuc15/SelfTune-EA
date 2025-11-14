@@ -384,7 +384,7 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
       g_gridLevels = level_index;
       g_lastEntryPrice = price;
       string direction = (type==ORDER_TYPE_BUY) ? "BUY" : "SELL";
-      int volume_digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_VOLUME_DIGITS);
+      int volume_digits = GetVolumeDigits(_Symbol);
       string price_str = DoubleToString(price,_Digits);
       string lot_str = DoubleToString(InpBaseLot,volume_digits);
       string details = StringFormat("Cluster %I64u %s level %d at %s lot %s",cluster_id,direction,level_index,price_str,lot_str);
@@ -417,7 +417,7 @@ void ManageBasketControls()
       bool closed_any = CloseAllPositionsForSymbol(_Symbol,closed_positions,closed_volume);
       if(closed_any)
         {
-         int volume_digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_VOLUME_DIGITS);
+         int volume_digits = GetVolumeDigits(_Symbol);
          string volume_str = DoubleToString(closed_volume,volume_digits);
          string profit_str = DoubleToString(basket_profit,2);
          string details = StringFormat("Basket close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
@@ -442,7 +442,7 @@ void ManageBasketControls()
       if(ClosePartialOrders(_Symbol,PartialClosePercent,closed_volume,closed_positions))
         {
          g_partialCloseTriggered = true;
-         int volume_digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_VOLUME_DIGITS);
+         int volume_digits = GetVolumeDigits(_Symbol);
          string volume_str = DoubleToString(closed_volume,volume_digits);
          string profit_str = DoubleToString(basket_profit,2);
          string details = StringFormat("Partial close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
@@ -581,6 +581,25 @@ double GetTotalVolume(const string symbol)
    return(total);
   }
 //+------------------------------------------------------------------+
+//| Determine precision for volume formatting                        |
+//+------------------------------------------------------------------+
+int GetVolumeDigits(const string symbol)
+  {
+   double step = SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
+   if(step<=0.0)
+      return(2);
+
+   int digits = 0;
+   double scaled = step;
+   while(scaled<1.0 && digits<8)
+     {
+      scaled *= 10.0;
+      digits++;
+     }
+
+   return(digits);
+  }
+//+------------------------------------------------------------------+
 //| Close all positions for symbol                                    |
 //+------------------------------------------------------------------+
 bool CloseAllPositionsForSymbol(const string symbol,int &closed_positions,double &closed_volume)
@@ -642,7 +661,7 @@ bool ClosePartialOrders(const string symbol,double percent,double &closed_volume
 
    double min_volume = SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN);
    double step = SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
-   int volume_digits = (int)SymbolInfoInteger(symbol,SYMBOL_VOLUME_DIGITS);
+   int volume_digits = GetVolumeDigits(symbol);
 
    double total_volume = GetTotalVolume(symbol);
    if(total_volume<=min_volume)
@@ -792,12 +811,14 @@ void LogEvent(const string event_type,const string details)
    if(!g_logHeaderWritten)
       EnsureLogHeader();
 
-   int handle = FileOpen(g_logFileName,FILE_WRITE|FILE_CSV|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_APPEND);
+   int handle = FileOpen(g_logFileName,FILE_READ|FILE_WRITE|FILE_CSV|FILE_SHARE_READ|FILE_SHARE_WRITE);
    if(handle==INVALID_HANDLE)
      {
-      Print("Failed to open log file for append: ",GetLastError());
+      Print("Failed to open log file: ",GetLastError());
       return;
      }
+
+   FileSeek(handle,0,SEEK_END);
 
    string time_str = TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS);
    FileWrite(handle,time_str,event_type,details);
