@@ -20,7 +20,6 @@ input double    InpMFIBullishLevel     = 55.0;      // Minimum MFI for buy
 input double    InpMFIBearishLevel     = 45.0;      // Maximum MFI for sell
 input int       InpVolumeLookback      = 20;        // Bars for average volume
 input double    InpVolumeMultiplier    = 1.10;      // Current volume must exceed average * multiplier
-input double    InpStopLossPoints      = 300;       // Stop Loss in points
 input double    InpTakeProfitPoints    = 600;       // Take Profit in points (used when grid disabled)
 input double    InpMaxSpreadPoints     = 30;        // Maximum allowed spread in points
 input double    InpMaxDrawdownPercent  = 20.0;      // Maximum total drawdown (%)
@@ -354,16 +353,7 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
       return(false);
 
    double price = (type==ORDER_TYPE_BUY) ? tick.ask : tick.bid;
-   double sl = 0.0;
    double tp = 0.0;
-
-   if(InpStopLossPoints>0)
-     {
-      if(type==ORDER_TYPE_BUY)
-         sl = price - InpStopLossPoints*_Point;
-      else
-         sl = price + InpStopLossPoints*_Point;
-     }
 
    double tp_points = ComputeDynamicTPPoints(level_index);
    if(tp_points>0.0)
@@ -376,8 +366,8 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
 
    string comment = BuildClusterComment(cluster_id);
    bool result = (type==ORDER_TYPE_BUY) ?
-      trade.Buy(InpBaseLot,_Symbol,price,sl,tp,comment) :
-      trade.Sell(InpBaseLot,_Symbol,price,sl,tp,comment);
+      trade.Buy(InpBaseLot,_Symbol,price,0.0,tp,comment) :
+      trade.Sell(InpBaseLot,_Symbol,price,0.0,tp,comment);
 
    if(result)
      {
@@ -883,16 +873,7 @@ void OpenBasicPosition(ENUM_ORDER_TYPE type)
       return;
 
    double price = (type==ORDER_TYPE_BUY) ? tick.ask : tick.bid;
-   double sl = 0.0;
    double tp = 0.0;
-
-   if(InpStopLossPoints>0)
-     {
-      if(type==ORDER_TYPE_BUY)
-         sl = price - InpStopLossPoints*_Point;
-      else
-         sl = price + InpStopLossPoints*_Point;
-     }
 
    if(InpTakeProfitPoints>0)
      {
@@ -905,9 +886,9 @@ void OpenBasicPosition(ENUM_ORDER_TYPE type)
    string comment = "STEA_BASIC";
 
    if(type==ORDER_TYPE_BUY)
-      trade.Buy(InpBaseLot,_Symbol,price,sl,tp,comment);
+      trade.Buy(InpBaseLot,_Symbol,price,0.0,tp,comment);
    else
-      trade.Sell(InpBaseLot,_Symbol,price,sl,tp,comment);
+      trade.Sell(InpBaseLot,_Symbol,price,0.0,tp,comment);
   }
 //+------------------------------------------------------------------+
 //| Average tick volume                                              |
