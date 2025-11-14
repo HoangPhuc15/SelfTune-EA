@@ -40,10 +40,6 @@ input bool      EnablePartialClose     = true;      // Enable partial profit tak
 input double    PartialCloseThreshold  = 0.6;       // Threshold (fraction of basket target)
 input double    PartialClosePercent    = 50;        // Percent volume to close when threshold met
 
-sinput string   sep3                   = "--- GRID BEHAVIOR ---";
-input bool      AllowOverlapRecovery   = true;      // Allow overlapping clusters after N orders
-input int       OverlapAfterOrders     = 3;         // Orders required before overlap allowed
-
 CTrade          trade;
 
 int             fast_ma_handle = INVALID_HANDLE;
@@ -62,11 +58,12 @@ double          daily_start_equity = 0.0;
 int             current_trading_date = -1;
 
 int             g_gridLevels = 0;
-double          g_lastEntryPrice = 0.0;
+double          g_lastGridPrice = 0.0;
 ENUM_ORDER_TYPE g_currentClusterType = ORDER_TYPE_BUY;
 ulong           g_currentClusterId = 0;
 ulong           g_nextClusterId = 1;
 bool            g_partialCloseTriggered = false;
+datetime        g_lastEntryTime = 0;
 string          g_logFileName = "";
 bool            g_logHeaderWritten = false;
 
@@ -106,11 +103,12 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagic);
 
    g_gridLevels = 0;
-   g_lastEntryPrice = 0.0;
+   g_lastGridPrice = 0.0;
    g_currentClusterType = ORDER_TYPE_BUY;
    g_currentClusterId = 0;
    g_nextClusterId = 1;
    g_partialCloseTriggered = false;
+   g_lastEntryTime = 0;
    g_logFileName = StringFormat("SelfTuneEA_%s.csv",_Symbol);
    g_logHeaderWritten = false;
    EnsureLogHeader();
@@ -176,24 +174,6 @@ void OnTick()
       else if(sell_signal)
          StartNewCluster(ORDER_TYPE_SELL);
       return;
-     }
-
-   int cluster_orders = CountClusterOrders(g_currentClusterId);
-   if(cluster_orders==0)
-      SyncClusterState();
-
-   cluster_orders = CountClusterOrders(g_currentClusterId);
-
-   if(AllowOverlapRecovery && cluster_orders>=OverlapAfterOrders && (buy_signal || sell_signal))
-     {
-      bool opened = false;
-      if(buy_signal)
-         opened = StartNewCluster(ORDER_TYPE_BUY);
-      else if(sell_signal)
-         opened = StartNewCluster(ORDER_TYPE_SELL);
-
-      if(opened)
-         return;
      }
 
    MaintainGrid();
@@ -272,7 +252,7 @@ void SyncClusterState()
      {
       g_currentClusterId = max_cluster;
       g_currentClusterType = cluster_type;
-      g_lastEntryPrice = last_price;
+      g_lastGridPrice = last_price;
       g_gridLevels = CountClusterOrders(max_cluster);
       if(g_nextClusterId<=max_cluster)
          g_nextClusterId = max_cluster+1;
@@ -308,10 +288,14 @@ void MaintainGrid()
       return;
 
    double current_price = (g_currentClusterType==ORDER_TYPE_BUY) ? tick.ask : tick.bid;
-   if(g_lastEntryPrice==0.0)
-      g_lastEntryPrice = current_price;
+   if(g_lastGridPrice==0.0)
+     {
+      UpdateLastEntryFromPositions(g_currentClusterId);
+      if(g_lastGridPrice==0.0)
+         return;
+     }
 
-   double distance = MathAbs(current_price-g_lastEntryPrice);
+   double distance = MathAbs(current_price-g_lastGridPrice);
    if(distance<step)
       return;
 
@@ -334,7 +318,7 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
       return(false);
 
    ulong new_cluster_id = g_nextClusterId;
-   g_lastEntryPrice = 0.0;
+   g_lastGridPrice = 0.0;
 
    if(OpenGridOrder(type,new_cluster_id,1))
      {
@@ -361,6 +345,13 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
    double sl = 0.0;
    double tp = 0.0;
 
+   datetime now = TimeCurrent();
+   if(g_lastEntryTime!=0 && (now-g_lastEntryTime)<=60)
+     {
+      PrintFormat("Entry skipped due to cooldown. Seconds since last entry: %d",(int)(now-g_lastEntryTime));
+      return(false);
+     }
+
    string comment = BuildClusterComment(cluster_id);
    bool result = (type==ORDER_TYPE_BUY) ?
       trade.Buy(InpBaseLot,_Symbol,price,sl,tp,comment) :
@@ -368,8 +359,9 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
 
    if(result)
      {
+      g_lastEntryTime = now;
       g_gridLevels = level_index;
-      g_lastEntryPrice = price;
+      g_lastGridPrice = price;
       string direction = (type==ORDER_TYPE_BUY) ? "BUY" : "SELL";
       int volume_digits = GetVolumeDigits(_Symbol);
       string price_str = DoubleToString(price,_Digits);
@@ -378,8 +370,24 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
       LogEvent("GridEntry",details);
       double virtual_tp_points = GetVirtualTP(level_index-1);
       string virtual_tp_str = DoubleToString(virtual_tp_points,1);
-      Print("Grid order opened WITHOUT real TP/SL — using virtual basket TP only");
+      Print("Grid order opened WITHOUT real TP/SL — virtual basket logic active");
       Print("New grid level ",g_gridLevels," opened at price ",price_str,", virtual TP ",virtual_tp_str," points");
+      double basket_profit = 0.0;
+      for(int i=PositionsTotal()-1;i>=0;--i)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket==0)
+            continue;
+         if(!PositionSelectByTicket(ticket))
+            continue;
+         if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+            continue;
+         if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
+            continue;
+
+         basket_profit += PositionGetDouble(POSITION_PROFIT);
+        }
+      PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s",g_gridLevels,price_str,DoubleToString(basket_profit,2));
      }
 
    return(result);
@@ -399,12 +407,29 @@ double GetVirtualTP(int level)
 //+------------------------------------------------------------------+
 void ManageBasketControls()
   {
-   double basket_profit = GetTotalProfit(_Symbol);
+   double basket_profit = 0.0;
+
+   for(int i=PositionsTotal()-1;i>=0;--i)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
+         continue;
+
+      basket_profit += PositionGetDouble(POSITION_PROFIT);
+     }
 
    if(InpBasketProfitTarget>0.0 && basket_profit>=InpBasketProfitTarget)
      {
       int closed_positions = 0;
       double closed_volume = 0.0;
+      int previous_levels = g_gridLevels;
+      double price_snapshot = g_lastGridPrice;
       bool closed_any = CloseAllClusterOrders(_Symbol,closed_positions,closed_volume);
       if(closed_any)
         {
@@ -414,9 +439,13 @@ void ManageBasketControls()
          string details = StringFormat("Basket close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
          LogEvent("BasketClose",details);
          Print("Basket TP reached: closing entire cluster at profit ",profit_str);
+         PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s, Cluster Reset Triggered",previous_levels,DoubleToString(price_snapshot,_Digits),profit_str);
         }
       if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
+        {
          ResetGridState();
+         g_lastEntryTime = 0;
+        }
       return;
      }
 
@@ -484,7 +513,7 @@ void UpdateLastEntryFromPositions(ulong cluster_id)
       return;
 
    datetime latest = 0;
-   double price = g_lastEntryPrice;
+   double price = g_lastGridPrice;
 
    for(int i=0;i<PositionsTotal();++i)
      {
@@ -515,7 +544,7 @@ void UpdateLastEntryFromPositions(ulong cluster_id)
      }
 
    if(latest>0)
-      g_lastEntryPrice = price;
+      g_lastGridPrice = price;
   }
 //+------------------------------------------------------------------+
 //| Reset grid state                                                  |
@@ -524,11 +553,12 @@ void ResetGridState()
   {
    bool had_cluster = (g_currentClusterId!=0 || g_gridLevels>0);
    g_gridLevels = 0;
-   g_lastEntryPrice = 0.0;
+   g_lastGridPrice = 0.0;
    g_currentClusterType = ORDER_TYPE_BUY;
    g_currentClusterId = 0;
    g_partialCloseTriggered = false;
    g_nextClusterId = 1;
+   g_lastEntryTime = 0;
    if(had_cluster)
       Print("Cluster reset — ready for next grid cycle");
   }
@@ -883,10 +913,19 @@ void OpenBasicPosition(ENUM_ORDER_TYPE type)
    double sl = 0.0;
    double tp = 0.0;
 
-   if(type==ORDER_TYPE_BUY)
-      trade.Buy(InpBaseLot,_Symbol,price,sl,tp,comment);
-   else
+   datetime now = TimeCurrent();
+   if(g_lastEntryTime!=0 && (now-g_lastEntryTime)<=60)
+     {
+      PrintFormat("Basic entry skipped due to cooldown. Seconds since last entry: %d",(int)(now-g_lastEntryTime));
+      return;
+     }
+
+   bool result = (type==ORDER_TYPE_BUY) ?
+      trade.Buy(InpBaseLot,_Symbol,price,sl,tp,comment) :
       trade.Sell(InpBaseLot,_Symbol,price,sl,tp,comment);
+
+   if(result)
+      g_lastEntryTime = now;
   }
 //+------------------------------------------------------------------+
 //| Average tick volume                                              |
