@@ -229,7 +229,7 @@ void SyncClusterState()
       string comment = PositionGetString(POSITION_COMMENT);
       ulong cluster_id = ExtractClusterId(comment);
       if(cluster_id==0)
-         cluster_id = 1;
+         continue;
 
       ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
@@ -256,6 +256,14 @@ void SyncClusterState()
       g_gridLevels = CountClusterOrders(max_cluster);
       if(g_nextClusterId<=max_cluster)
          g_nextClusterId = max_cluster+1;
+     }
+   else
+     {
+      g_currentClusterId = 0;
+      g_gridLevels = 0;
+      g_lastGridPrice = 0.0;
+      g_currentClusterType = ORDER_TYPE_BUY;
+      g_partialCloseTriggered = false;
      }
   }
 //+------------------------------------------------------------------+
@@ -295,9 +303,18 @@ void MaintainGrid()
          return;
      }
 
-   double distance = MathAbs(current_price-g_lastGridPrice);
-   if(distance<step)
-      return;
+   if(g_currentClusterType==ORDER_TYPE_BUY)
+     {
+      double adverse_move = g_lastGridPrice-current_price;
+      if(adverse_move<step)
+         return;
+     }
+   else
+     {
+      double adverse_move = current_price-g_lastGridPrice;
+      if(adverse_move<step)
+         return;
+     }
 
    int next_level = cluster_orders+1;
    if(next_level>InpMaxGridLevels)
@@ -407,22 +424,12 @@ double GetVirtualTP(int level)
 //+------------------------------------------------------------------+
 void ManageBasketControls()
   {
+   if(g_currentClusterId==0)
+      return;
+
    double basket_profit = 0.0;
 
-   for(int i=PositionsTotal()-1;i>=0;--i)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket==0)
-         continue;
-      if(!PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
-         continue;
-      if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
-         continue;
-
-      basket_profit += PositionGetDouble(POSITION_PROFIT);
-     }
+   basket_profit = GetClusterProfit(g_currentClusterId);
 
    if(InpBasketProfitTarget>0.0 && basket_profit>=InpBasketProfitTarget)
      {
@@ -430,7 +437,7 @@ void ManageBasketControls()
       double closed_volume = 0.0;
       int previous_levels = g_gridLevels;
       double price_snapshot = g_lastGridPrice;
-      bool closed_any = CloseAllClusterOrders(_Symbol,closed_positions,closed_volume);
+      bool closed_any = CloseAllClusterOrders(g_currentClusterId,closed_positions,closed_volume);
       if(closed_any)
         {
          int volume_digits = GetVolumeDigits(_Symbol);
@@ -439,7 +446,7 @@ void ManageBasketControls()
          string details = StringFormat("Basket close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
          LogEvent("BasketClose",details);
          Print("Basket TP reached: closing entire cluster at profit ",profit_str);
-         PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s, Cluster Reset Triggered",previous_levels,DoubleToString(price_snapshot,_Digits),profit_str);
+         PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s, Cluster Reset Triggered (Cluster %I64u)",previous_levels,DoubleToString(price_snapshot,_Digits),profit_str,g_currentClusterId);
         }
       if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
         {
@@ -460,7 +467,7 @@ void ManageBasketControls()
      {
       double closed_volume = 0.0;
       int closed_positions = 0;
-      if(ClosePartialOrders(_Symbol,PartialClosePercent,closed_volume,closed_positions))
+      if(ClosePartialOrders(g_currentClusterId,PartialClosePercent,closed_volume,closed_positions))
         {
          g_partialCloseTriggered = true;
          int volume_digits = GetVolumeDigits(_Symbol);
@@ -468,7 +475,9 @@ void ManageBasketControls()
          string profit_str = DoubleToString(basket_profit,2);
          string details = StringFormat("Partial close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
          LogEvent("PartialClose",details);
-         Print("Partial TP triggered: ",profit_str);
+         PrintFormat("Partial TP triggered: %s (Grid Level: %d, Last Price: %s)",profit_str,g_gridLevels,DoubleToString(g_lastGridPrice,_Digits));
+         PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s (Cluster %I64u)",g_gridLevels,DoubleToString(g_lastGridPrice,_Digits),profit_str,g_currentClusterId);
+         g_gridLevels = CountClusterOrders(g_currentClusterId);
         }
      }
   }
@@ -496,7 +505,7 @@ int CountClusterOrders(ulong cluster_id)
       string comment = PositionGetString(POSITION_COMMENT);
       ulong id = ExtractClusterId(comment);
       if(id==0)
-         id = 1;
+         continue;
 
       if(id==cluster_id)
          count++;
@@ -530,7 +539,7 @@ void UpdateLastEntryFromPositions(ulong cluster_id)
       string comment = PositionGetString(POSITION_COMMENT);
       ulong id = ExtractClusterId(comment);
       if(id==0)
-         id = 1;
+         continue;
 
       if(id!=cluster_id)
          continue;
@@ -563,11 +572,14 @@ void ResetGridState()
       Print("Cluster reset — ready for next grid cycle");
   }
 //+------------------------------------------------------------------+
-//| Get total profit for symbol                                       |
+//| Get total profit for the active cluster                           |
 //+------------------------------------------------------------------+
-double GetTotalProfit(const string symbol)
+double GetClusterProfit(const ulong cluster_id)
   {
    double total = 0.0;
+   if(cluster_id==0)
+      return(0.0);
+
    for(int i=0;i<PositionsTotal();++i)
      {
       ulong ticket = PositionGetTicket(i);
@@ -575,9 +587,7 @@ double GetTotalProfit(const string symbol)
          continue;
       if(!PositionSelectByTicket(ticket))
          continue;
-      if(PositionGetString(POSITION_SYMBOL)!=symbol)
-         continue;
-      if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
+      if(!IsClusterPosition(ticket,cluster_id))
          continue;
 
       total += PositionGetDouble(POSITION_PROFIT);
@@ -607,6 +617,29 @@ double GetTotalVolume(const string symbol)
    return(total);
   }
 //+------------------------------------------------------------------+
+//| Get total volume for the active cluster                           |
+//+------------------------------------------------------------------+
+double GetClusterVolume(const ulong cluster_id)
+  {
+   if(cluster_id==0)
+      return(0.0);
+
+   double total = 0.0;
+   for(int i=0;i<PositionsTotal();++i)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(!IsClusterPosition(ticket,cluster_id))
+         continue;
+
+      total += PositionGetDouble(POSITION_VOLUME);
+     }
+   return(total);
+  }
+//+------------------------------------------------------------------+
 //| Determine precision for volume formatting                        |
 //+------------------------------------------------------------------+
 int GetVolumeDigits(const string symbol)
@@ -626,9 +659,9 @@ int GetVolumeDigits(const string symbol)
    return(digits);
   }
 //+------------------------------------------------------------------+
-//| Close all cluster orders for symbol                               |
+//| Close all orders in the active cluster                            |
 //+------------------------------------------------------------------+
-bool CloseAllClusterOrders(const string symbol,int &closed_positions,double &closed_volume)
+bool CloseAllClusterOrders(const ulong cluster_id,int &closed_positions,double &closed_volume)
   {
    closed_positions = 0;
    closed_volume = 0.0;
@@ -644,9 +677,7 @@ bool CloseAllClusterOrders(const string symbol,int &closed_positions,double &clo
          continue;
       if(!PositionSelectByTicket(ticket))
          continue;
-      if(PositionGetString(POSITION_SYMBOL)!=symbol)
-         continue;
-      if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
+      if(!IsClusterPosition(ticket,cluster_id))
          continue;
 
       int new_size = ArraySize(tickets)+1;
@@ -672,9 +703,9 @@ bool CloseAllClusterOrders(const string symbol,int &closed_positions,double &clo
    return(closed_any);
   }
 //+------------------------------------------------------------------+
-//| Close partial orders                                              |
+//| Close partial volume from the active cluster                      |
 //+------------------------------------------------------------------+
-bool ClosePartialOrders(const string symbol,double percent,double &closed_volume,int &closed_positions)
+bool ClosePartialOrders(const ulong cluster_id,double percent,double &closed_volume,int &closed_positions)
   {
    closed_volume = 0.0;
    closed_positions = 0;
@@ -685,11 +716,14 @@ bool ClosePartialOrders(const string symbol,double percent,double &closed_volume
    if(ratio>=1.0)
       ratio = 0.9999;
 
-   double min_volume = SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN);
-   double step = SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
-   int volume_digits = GetVolumeDigits(symbol);
+   if(cluster_id==0)
+      return(false);
 
-   double total_volume = GetTotalVolume(symbol);
+   double min_volume = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   int volume_digits = GetVolumeDigits(_Symbol);
+
+   double total_volume = GetClusterVolume(cluster_id);
    if(total_volume<=min_volume)
       return(false);
 
@@ -715,9 +749,7 @@ bool ClosePartialOrders(const string symbol,double percent,double &closed_volume
          continue;
       if(!PositionSelectByTicket(ticket))
          continue;
-      if(PositionGetString(POSITION_SYMBOL)!=symbol)
-         continue;
-      if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
+      if(!IsClusterPosition(ticket,cluster_id))
          continue;
 
       double volume = PositionGetDouble(POSITION_VOLUME);
@@ -779,6 +811,29 @@ double NormalizeVolumeValue(double volume,double min_volume,double step,int digi
 string BuildClusterComment(const ulong cluster_id)
   {
    return(StringFormat("STEA_CLUSTER_%I64u",cluster_id));
+  }
+//+------------------------------------------------------------------+
+//| Check if position belongs to cluster                              |
+//+------------------------------------------------------------------+
+bool IsClusterPosition(const ulong ticket,const ulong cluster_id)
+  {
+   if(cluster_id==0 || ticket==0)
+      return(false);
+
+   if(!PositionSelectByTicket(ticket))
+      return(false);
+
+   if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+      return(false);
+
+   if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
+      return(false);
+
+   ulong id = ExtractClusterId(PositionGetString(POSITION_COMMENT));
+   if(id==0)
+      return(false);
+
+   return(id==cluster_id);
   }
 //+------------------------------------------------------------------+
 //| Extract cluster identifier from comment                           |
