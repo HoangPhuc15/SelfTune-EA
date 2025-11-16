@@ -708,25 +708,48 @@ double GetLastClusterLot(const ulong cluster_id)
 //+------------------------------------------------------------------+
 double GetNextGridLot(const ulong cluster_id,const int level_index)
   {
-   double lot = InpBaseLot;
-
-   if(level_index>1 && EnableGrid && InpLotMultiplier>1.0)
-     {
-      double last_lot = GetLastClusterLot(cluster_id);
-      if(last_lot<=0.0)
-         last_lot = InpBaseLot;
-      lot = last_lot*InpLotMultiplier;
-     }
-
    double min_volume = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
    double max_volume = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    int volume_digits = GetVolumeDigits(_Symbol);
 
+   double previous_lot = InpBaseLot;
+   bool has_previous = (level_index>1);
+   if(has_previous)
+     {
+      double last_lot = GetLastClusterLot(cluster_id);
+      if(last_lot>0.0)
+         previous_lot = last_lot;
+     }
+
+   double lot = has_previous ? previous_lot : InpBaseLot;
+   bool scaling_enabled = (has_previous && EnableGrid && InpLotMultiplier>1.0);
+   if(scaling_enabled)
+      lot = previous_lot*InpLotMultiplier;
+
    if(max_volume>0.0)
       lot = MathMin(lot,max_volume);
 
    double normalized = NormalizeVolumeValue(lot,min_volume,step,volume_digits);
+   if(normalized<=0.0)
+      normalized = NormalizeVolumeValue(InpBaseLot,min_volume,step,volume_digits);
+
+   if(has_previous)
+     {
+      double reference = NormalizeDouble(previous_lot,volume_digits);
+      if(normalized<=reference+1e-8)
+        {
+         if(scaling_enabled && step>0.0)
+           {
+            double bumped = reference+step;
+            if(max_volume>0.0)
+               bumped = MathMin(bumped,max_volume);
+            normalized = NormalizeDouble(bumped,volume_digits);
+           }
+         else
+           normalized = reference;
+        }
+     }
 
    if(normalized<min_volume)
       normalized = min_volume;
