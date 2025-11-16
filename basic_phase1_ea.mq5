@@ -28,6 +28,7 @@ input ulong     InpMagic               = 20240901;  // Magic number
 sinput string   sep1                   = "--- GRID SETTINGS ---";
 input bool      EnableGrid             = true;      // Enable grid trading
 input double    InpBaseLot             = 0.01;      // Base lot for each grid order
+input double    InpLotMultiplier       = 1.35;      // Multiplier for each subsequent grid order
 input double    InpGridStepPoints      = 200;       // Distance between grid orders (points)
 input int       InpMaxGridLevels       = 50;        // Maximum grid levels per cluster
 input double    InpMaxTotalLot         = 1.0;       // Maximum total lot size across all orders
@@ -284,9 +285,6 @@ void MaintainGrid()
    if(cluster_orders>=InpMaxGridLevels)
       return;
 
-   if(GetTotalVolume(_Symbol)+InpBaseLot>InpMaxTotalLot+1e-6)
-      return;
-
    double step = InpGridStepPoints*_Point;
    if(step<=0.0)
       return;
@@ -317,7 +315,14 @@ void MaintainGrid()
    if(next_level>InpMaxGridLevels)
       return;
 
-   if(OpenGridOrder(g_currentClusterType,g_currentClusterId,next_level))
+   double next_lot = GetNextGridLot(g_currentClusterId,next_level);
+   if(next_lot<=0.0)
+      return;
+
+   if(GetTotalVolume(_Symbol)+next_lot>InpMaxTotalLot+1e-6)
+      return;
+
+   if(OpenGridOrder(g_currentClusterType,g_currentClusterId,next_level,next_lot))
      {
       UpdateLastEntryFromPositions(g_currentClusterId);
       g_gridLevels = CountClusterOrders(g_currentClusterId);
@@ -331,13 +336,17 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
    if(g_currentClusterId!=0)
       return(false);
 
-   if(GetTotalVolume(_Symbol)+InpBaseLot>InpMaxTotalLot+1e-6)
-      return(false);
-
    ulong new_cluster_id = g_nextClusterId;
    g_lastGridPrice = 0.0;
 
-   if(OpenGridOrder(type,new_cluster_id,1))
+   double initial_lot = GetNextGridLot(new_cluster_id,1);
+   if(initial_lot<=0.0)
+      return(false);
+
+   if(GetTotalVolume(_Symbol)+initial_lot>InpMaxTotalLot+1e-6)
+      return(false);
+
+   if(OpenGridOrder(type,new_cluster_id,1,initial_lot))
      {
       g_currentClusterId = new_cluster_id;
       g_nextClusterId = new_cluster_id+1;
@@ -352,8 +361,11 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
 //+------------------------------------------------------------------+
 //| Open grid order                                                   |
 //+------------------------------------------------------------------+
-bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
+bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index,double volume)
   {
+   if(volume<=0.0)
+      return(false);
+
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick))
       return(false);
@@ -367,8 +379,8 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
 
    string comment = BuildClusterComment(cluster_id);
    bool result = (type==ORDER_TYPE_BUY) ?
-      trade.Buy(InpBaseLot,_Symbol,price,sl,tp,comment) :
-      trade.Sell(InpBaseLot,_Symbol,price,sl,tp,comment);
+      trade.Buy(volume,_Symbol,price,sl,tp,comment) :
+      trade.Sell(volume,_Symbol,price,sl,tp,comment);
 
    if(result)
      {
@@ -378,12 +390,15 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
       string direction = (type==ORDER_TYPE_BUY) ? "BUY" : "SELL";
       int volume_digits = GetVolumeDigits(_Symbol);
       string price_str = DoubleToString(price,_Digits);
-      string lot_str = DoubleToString(InpBaseLot,volume_digits);
+      string lot_str = DoubleToString(volume,volume_digits);
       string details = StringFormat("Cluster %I64u %s level %d at %s lot %s",cluster_id,direction,level_index,price_str,lot_str);
       LogEvent("GridEntry",details);
       double virtual_tp_points = GetVirtualTP(level_index-1);
       string virtual_tp_str = DoubleToString(virtual_tp_points,1);
       Print("Grid order opened WITHOUT real TP/SL — virtual basket logic active");
+      string dir_log = (type==ORDER_TYPE_BUY) ? "buy" : "sell";
+      string step_str = DoubleToString(InpGridStepPoints,1);
+      PrintFormat("[Grid] Level=%d | Direction=%s | Lot=%s | Multiplier=%.2f | Step=%s",g_gridLevels,dir_log,lot_str,InpLotMultiplier,step_str);
       Print("New grid level ",g_gridLevels," opened at price ",price_str,", virtual TP ",virtual_tp_str," points");
       double basket_profit = 0.0;
       for(int i=PositionsTotal()-1;i>=0;--i)
@@ -656,6 +671,72 @@ double GetClusterVolume(const ulong cluster_id)
       total += PositionGetDouble(POSITION_VOLUME);
      }
    return(total);
+  }
+//+------------------------------------------------------------------+
+//| Get the latest lot size used inside a cluster                     |
+//+------------------------------------------------------------------+
+double GetLastClusterLot(const ulong cluster_id)
+  {
+   if(cluster_id==0)
+      return(0.0);
+
+   double volume = 0.0;
+   datetime latest = 0;
+
+   for(int i=0;i<PositionsTotal();++i)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(!IsClusterPosition(ticket,cluster_id))
+         continue;
+
+      datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
+      if(open_time>=latest)
+        {
+         latest = open_time;
+         volume = PositionGetDouble(POSITION_VOLUME);
+        }
+     }
+
+   return(volume);
+  }
+//+------------------------------------------------------------------+
+//| Determine the next lot to use for the grid                        |
+//+------------------------------------------------------------------+
+double GetNextGridLot(const ulong cluster_id,const int level_index)
+  {
+   double lot = InpBaseLot;
+
+   if(level_index>1 && EnableGrid && InpLotMultiplier>1.0)
+     {
+      double last_lot = GetLastClusterLot(cluster_id);
+      if(last_lot<=0.0)
+         last_lot = InpBaseLot;
+      lot = last_lot*InpLotMultiplier;
+     }
+
+   double min_volume = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double max_volume = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   int volume_digits = GetVolumeDigits(_Symbol);
+
+   if(max_volume>0.0)
+      lot = MathMin(lot,max_volume);
+
+   double normalized = NormalizeVolumeValue(lot,min_volume,step,volume_digits);
+
+   if(normalized<min_volume)
+      normalized = min_volume;
+
+   if(max_volume>0.0)
+      normalized = MathMin(normalized,max_volume);
+
+   normalized = NormalizeDouble(normalized,volume_digits);
+
+   return(normalized);
   }
 //+------------------------------------------------------------------+
 //| Determine precision for volume formatting                        |
