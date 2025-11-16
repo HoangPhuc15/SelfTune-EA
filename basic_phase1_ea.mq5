@@ -67,6 +67,15 @@ bool            g_partialCloseTriggered = false;
 string          g_logFileName = "";
 bool            g_logHeaderWritten = false;
 
+struct GridClusterCounters
+  {
+   int buy_levels;
+   int sell_levels;
+  };
+
+GridClusterCounters g_grid = {0,0};
+ENUM_ORDER_TYPE     g_activeDirection = (ENUM_ORDER_TYPE)-1;
+
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
 //+------------------------------------------------------------------+
@@ -110,6 +119,9 @@ int OnInit()
    g_partialCloseTriggered = false;
    g_logFileName = StringFormat("SelfTuneEA_%s.csv",_Symbol);
    g_logHeaderWritten = false;
+   g_grid.buy_levels = 0;
+   g_grid.sell_levels = 0;
+   g_activeDirection = (ENUM_ORDER_TYPE)-1;
    EnsureLogHeader();
 
    EntryCooldown("Init",false,true);
@@ -253,8 +265,13 @@ void SyncClusterState()
      {
       g_currentClusterId = max_cluster;
       g_currentClusterType = cluster_type;
+      g_activeDirection = cluster_type;
       g_lastGridPrice = last_price;
       g_gridLevels = CountClusterOrders(max_cluster);
+      if(cluster_type==ORDER_TYPE_BUY)
+         g_grid.buy_levels = (int)MathMax((double)g_grid.buy_levels,(double)g_gridLevels);
+      else
+         g_grid.sell_levels = (int)MathMax((double)g_grid.sell_levels,(double)g_gridLevels);
       if(g_nextClusterId<=max_cluster)
          g_nextClusterId = max_cluster+1;
      }
@@ -265,6 +282,9 @@ void SyncClusterState()
       g_lastGridPrice = 0.0;
       g_currentClusterType = ORDER_TYPE_BUY;
       g_partialCloseTriggered = false;
+      g_grid.buy_levels = 0;
+      g_grid.sell_levels = 0;
+      g_activeDirection = (ENUM_ORDER_TYPE)-1;
      }
   }
 //+------------------------------------------------------------------+
@@ -278,11 +298,11 @@ void MaintainGrid()
    if(g_currentClusterId==0)
       return;
 
+   if(g_activeDirection!=(ENUM_ORDER_TYPE)-1 && g_currentClusterType!=g_activeDirection)
+      g_currentClusterType = g_activeDirection;
+
    int cluster_orders = CountClusterOrders(g_currentClusterId);
    if(cluster_orders<=0)
-      return;
-
-   if(cluster_orders>=InpMaxGridLevels)
       return;
 
    double step = InpGridStepPoints*_Point;
@@ -311,19 +331,37 @@ void MaintainGrid()
    if(g_currentClusterType==ORDER_TYPE_SELL && current_price<g_lastGridPrice)
       return;
 
-   int next_level = cluster_orders+1;
+   int current_level = (g_currentClusterType==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
+   int next_level = current_level+1;
    if(next_level>InpMaxGridLevels)
       return;
 
-   double next_lot = GetNextGridLot(g_currentClusterId,next_level);
+   double next_lot = GetNextGridLot(g_currentClusterType,current_level);
    if(next_lot<=0.0)
       return;
 
    if(GetTotalVolume(_Symbol)+next_lot>InpMaxTotalLot+1e-6)
       return;
 
+   static datetime lastGridOpen = 0;
+   static ulong     lastClusterTracked = 0;
+   if(lastClusterTracked!=g_currentClusterId)
+     {
+      lastClusterTracked = g_currentClusterId;
+      lastGridOpen = 0;
+     }
+
+   datetime now = TimeCurrent();
+   if(lastGridOpen!=0 && (now-lastGridOpen)<60)
+      return;
+
    if(OpenGridOrder(g_currentClusterType,g_currentClusterId,next_level,next_lot))
      {
+      if(g_currentClusterType==ORDER_TYPE_BUY)
+         g_grid.buy_levels++;
+      else
+         g_grid.sell_levels++;
+      lastGridOpen = now;
       UpdateLastEntryFromPositions(g_currentClusterId);
       g_gridLevels = CountClusterOrders(g_currentClusterId);
      }
@@ -339,18 +377,28 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
    ulong new_cluster_id = g_nextClusterId;
    g_lastGridPrice = 0.0;
 
-   double initial_lot = GetNextGridLot(new_cluster_id,1);
+   g_grid.buy_levels = 0;
+   g_grid.sell_levels = 0;
+
+   int current_level = (type==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
+   int display_level = current_level+1;
+   double initial_lot = GetNextGridLot(type,current_level);
    if(initial_lot<=0.0)
       return(false);
 
    if(GetTotalVolume(_Symbol)+initial_lot>InpMaxTotalLot+1e-6)
       return(false);
 
-   if(OpenGridOrder(type,new_cluster_id,1,initial_lot))
+   if(OpenGridOrder(type,new_cluster_id,display_level,initial_lot))
      {
+      if(type==ORDER_TYPE_BUY)
+         g_grid.buy_levels++;
+      else
+         g_grid.sell_levels++;
       g_currentClusterId = new_cluster_id;
       g_nextClusterId = new_cluster_id+1;
       g_currentClusterType = type;
+      g_activeDirection = type;
       g_partialCloseTriggered = false;
       UpdateLastEntryFromPositions(g_currentClusterId);
       g_gridLevels = CountClusterOrders(g_currentClusterId);
@@ -395,10 +443,11 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index,double 
       LogEvent("GridEntry",details);
       double virtual_tp_points = GetVirtualTP(level_index-1);
       string virtual_tp_str = DoubleToString(virtual_tp_points,1);
-      Print("Grid order opened WITHOUT real TP/SL — virtual basket logic active");
-      string dir_log = (type==ORDER_TYPE_BUY) ? "buy" : "sell";
-      string step_str = DoubleToString(InpGridStepPoints,1);
-      PrintFormat("[Grid] Level=%d | Direction=%s | Lot=%s | Multiplier=%.2f | Step=%s",g_gridLevels,dir_log,lot_str,InpLotMultiplier,step_str);
+      Print("Grid order opened WITHOUT real TP/SL — using virtual basket TP only");
+      string dir_log = (type==ORDER_TYPE_BUY) ? "BUY" : "SELL";
+      string step_str = DoubleToString(InpGridStepPoints,0);
+      string base_str = DoubleToString(InpBaseLot,volume_digits);
+      PrintFormat("[GRID] Level=%d | Direction=%s | Lot=%s | Base=%s | Multiplier=%.2f | Step=%s",g_gridLevels,dir_log,lot_str,base_str,InpLotMultiplier,step_str);
       Print("New grid level ",g_gridLevels," opened at price ",price_str,", virtual TP ",virtual_tp_str," points");
       double basket_profit = 0.0;
       for(int i=PositionsTotal()-1;i>=0;--i)
@@ -454,7 +503,7 @@ void ManageBasketControls()
          string profit_str = DoubleToString(basket_profit,2);
          string details = StringFormat("Basket close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
          LogEvent("BasketClose",details);
-         Print("Basket TP reached: closing entire cluster at profit ",profit_str);
+         Print("[BASKET] Cluster fully closed – profit target reached (profit ",profit_str,")");
          PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s, Cluster Reset Triggered (Cluster %I64u)",previous_levels,DoubleToString(price_snapshot,_Digits),profit_str,g_currentClusterId);
         }
       if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
@@ -483,6 +532,7 @@ void ManageBasketControls()
          string profit_str = DoubleToString(basket_profit,2);
          string details = StringFormat("Partial close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
          LogEvent("PartialClose",details);
+         PrintFormat("[BASKET] Partial close triggered (%.0f%%)",PartialClosePercent);
          PrintFormat("Partial TP triggered: %s (Grid Level: %d, Last Price: %s)",profit_str,g_gridLevels,DoubleToString(g_lastGridPrice,_Digits));
          PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s (Cluster %I64u)",g_gridLevels,DoubleToString(g_lastGridPrice,_Digits),profit_str,g_currentClusterId);
          g_gridLevels = CountClusterOrders(g_currentClusterId);
@@ -574,6 +624,9 @@ void ResetGridState()
    g_currentClusterType = ORDER_TYPE_BUY;
    g_currentClusterId = 0;
    g_partialCloseTriggered = false;
+   g_grid.buy_levels = 0;
+   g_grid.sell_levels = 0;
+   g_activeDirection = (ENUM_ORDER_TYPE)-1;
    if(g_nextClusterId<=0)
       g_nextClusterId = 1;
    EntryCooldown("Reset",false,true);
@@ -669,88 +722,32 @@ double GetClusterVolume(const ulong cluster_id)
          continue;
 
       total += PositionGetDouble(POSITION_VOLUME);
-     }
+   }
    return(total);
-  }
-//+------------------------------------------------------------------+
-//| Get the latest lot size used inside a cluster                     |
-//+------------------------------------------------------------------+
-double GetLastClusterLot(const ulong cluster_id)
-  {
-   if(cluster_id==0)
-      return(0.0);
-
-   double volume = 0.0;
-   datetime latest = 0;
-
-   for(int i=0;i<PositionsTotal();++i)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket==0)
-         continue;
-      if(!PositionSelectByTicket(ticket))
-         continue;
-      if(!IsClusterPosition(ticket,cluster_id))
-         continue;
-
-      datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
-      if(open_time>=latest)
-        {
-         latest = open_time;
-         volume = PositionGetDouble(POSITION_VOLUME);
-        }
-     }
-
-   return(volume);
   }
 //+------------------------------------------------------------------+
 //| Determine the next lot to use for the grid                        |
 //+------------------------------------------------------------------+
-double GetNextGridLot(const ulong cluster_id,const int level_index)
+double GetNextGridLot(const ENUM_ORDER_TYPE type,const int level_zero_based)
   {
+   if(type!=ORDER_TYPE_BUY && type!=ORDER_TYPE_SELL)
+      return(0.0);
+
    double min_volume = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
    double max_volume = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    int volume_digits = GetVolumeDigits(_Symbol);
 
-   double previous_lot = InpBaseLot;
-   bool has_previous = (level_index>1);
-   if(has_previous)
-     {
-      double last_lot = GetLastClusterLot(cluster_id);
-      if(last_lot>0.0)
-         previous_lot = last_lot;
-     }
-
-   double lot = has_previous ? previous_lot : InpBaseLot;
-   bool scaling_enabled = (has_previous && EnableGrid && InpLotMultiplier>1.0);
-   if(scaling_enabled)
-      lot = previous_lot*InpLotMultiplier;
+   int level = MathMax(0,level_zero_based);
+   double multiplier = (EnableGrid && InpLotMultiplier>1.0) ? InpLotMultiplier : 1.0;
+   double lot = InpBaseLot;
+   if(level>0)
+      lot = InpBaseLot*MathPow(multiplier,(double)level);
 
    if(max_volume>0.0)
       lot = MathMin(lot,max_volume);
 
    double normalized = NormalizeVolumeValue(lot,min_volume,step,volume_digits);
-   if(normalized<=0.0)
-      normalized = NormalizeVolumeValue(InpBaseLot,min_volume,step,volume_digits);
-
-   if(has_previous)
-     {
-      double reference = NormalizeDouble(previous_lot,volume_digits);
-      if(normalized<=reference+1e-8)
-        {
-         if(scaling_enabled && step>0.0)
-           {
-            double bumped = reference+step;
-            if(max_volume>0.0)
-               bumped = MathMin(bumped,max_volume);
-            normalized = NormalizeDouble(bumped,volume_digits);
-           }
-         else
-           normalized = reference;
-        }
-     }
-
    if(normalized<min_volume)
       normalized = min_volume;
 
@@ -1053,13 +1050,20 @@ bool CheckBuySignal()
   {
    double avg_volume = AverageVolume();
    double current_volume = (double)rates[0].tick_volume;
-   bool volume_confirmed = (avg_volume>0.0 && current_volume >= avg_volume*InpVolumeMultiplier);
+   double relaxed_multiplier = MathMax(0.5,InpVolumeMultiplier-0.2);
+   bool volume_confirmed = (avg_volume<=0.0) || (current_volume >= avg_volume*relaxed_multiplier);
 
+   bool ma_bias = (fast_ma_buffer[0]>=slow_ma_buffer[0]);
    bool ma_cross_up = (fast_ma_buffer[0]>slow_ma_buffer[0] && fast_ma_buffer[1]<=slow_ma_buffer[1]);
-   bool rsi_confirm  = (rsi_buffer[0]>=InpRSIBullishLevel);
-   bool mfi_confirm  = (mfi_buffer[0]>=InpMFIBullishLevel);
+   bool ma_confirm = (ma_bias || ma_cross_up);
 
-   return(ma_cross_up && rsi_confirm && mfi_confirm && volume_confirmed);
+   double rsi_threshold = MathMax(0.0,InpRSIBullishLevel-5.0);
+   bool rsi_confirm  = (rsi_buffer[0]>=rsi_threshold);
+
+   double mfi_threshold  = MathMax(0.0,InpMFIBullishLevel-5.0);
+   bool mfi_confirm  = (mfi_buffer[0]>=mfi_threshold);
+
+   return(ma_confirm && rsi_confirm && mfi_confirm && volume_confirmed);
   }
 //+------------------------------------------------------------------+
 //| Sell signal                                                      |
@@ -1068,13 +1072,20 @@ bool CheckSellSignal()
   {
    double avg_volume = AverageVolume();
    double current_volume = (double)rates[0].tick_volume;
-   bool volume_confirmed = (avg_volume>0.0 && current_volume >= avg_volume*InpVolumeMultiplier);
+   double relaxed_multiplier = MathMax(0.5,InpVolumeMultiplier-0.2);
+   bool volume_confirmed = (avg_volume<=0.0) || (current_volume >= avg_volume*relaxed_multiplier);
 
+   bool ma_bias = (fast_ma_buffer[0]<=slow_ma_buffer[0]);
    bool ma_cross_down = (fast_ma_buffer[0]<slow_ma_buffer[0] && fast_ma_buffer[1]>=slow_ma_buffer[1]);
-   bool rsi_confirm   = (rsi_buffer[0]<=InpRSIBearishLevel);
-   bool mfi_confirm   = (mfi_buffer[0]<=InpMFIBearishLevel);
+   bool ma_confirm = (ma_bias || ma_cross_down);
 
-   return(ma_cross_down && rsi_confirm && mfi_confirm && volume_confirmed);
+   double rsi_threshold = MathMin(100.0,InpRSIBearishLevel+5.0);
+   bool rsi_confirm   = (rsi_buffer[0]<=rsi_threshold);
+
+   double mfi_threshold = MathMin(100.0,InpMFIBearishLevel+5.0);
+   bool mfi_confirm   = (mfi_buffer[0]<=mfi_threshold);
+
+   return(ma_confirm && rsi_confirm && mfi_confirm && volume_confirmed);
   }
 //+------------------------------------------------------------------+
 //| Open basic position helper                                       |
