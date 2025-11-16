@@ -63,7 +63,6 @@ ENUM_ORDER_TYPE g_currentClusterType = ORDER_TYPE_BUY;
 ulong           g_currentClusterId = 0;
 ulong           g_nextClusterId = 1;
 bool            g_partialCloseTriggered = false;
-datetime        g_lastEntryTime = 0;
 string          g_logFileName = "";
 bool            g_logHeaderWritten = false;
 
@@ -108,10 +107,11 @@ int OnInit()
    g_currentClusterId = 0;
    g_nextClusterId = 1;
    g_partialCloseTriggered = false;
-   g_lastEntryTime = 0;
    g_logFileName = StringFormat("SelfTuneEA_%s.csv",_Symbol);
    g_logHeaderWritten = false;
    EnsureLogHeader();
+
+   EntryCooldown("Init",false,true);
 
    return(INIT_SUCCEEDED);
   }
@@ -303,18 +303,15 @@ void MaintainGrid()
          return;
      }
 
-   if(g_currentClusterType==ORDER_TYPE_BUY)
-     {
-      double adverse_move = g_lastGridPrice-current_price;
-      if(adverse_move<step)
-         return;
-     }
-   else
-     {
-      double adverse_move = current_price-g_lastGridPrice;
-      if(adverse_move<step)
-         return;
-     }
+   double distance = MathAbs(current_price-g_lastGridPrice);
+   if(distance<step)
+      return;
+
+   if(g_currentClusterType==ORDER_TYPE_BUY && current_price>g_lastGridPrice)
+      return;
+
+   if(g_currentClusterType==ORDER_TYPE_SELL && current_price<g_lastGridPrice)
+      return;
 
    int next_level = cluster_orders+1;
    if(next_level>InpMaxGridLevels)
@@ -331,6 +328,9 @@ void MaintainGrid()
 //+------------------------------------------------------------------+
 bool StartNewCluster(ENUM_ORDER_TYPE type)
   {
+   if(g_currentClusterId!=0)
+      return(false);
+
    if(GetTotalVolume(_Symbol)+InpBaseLot>InpMaxTotalLot+1e-6)
       return(false);
 
@@ -362,12 +362,8 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
    double sl = 0.0;
    double tp = 0.0;
 
-   datetime now = TimeCurrent();
-   if(g_lastEntryTime!=0 && (now-g_lastEntryTime)<=60)
-     {
-      PrintFormat("Entry skipped due to cooldown. Seconds since last entry: %d",(int)(now-g_lastEntryTime));
+   if(!EntryCooldown("Grid",false,false))
       return(false);
-     }
 
    string comment = BuildClusterComment(cluster_id);
    bool result = (type==ORDER_TYPE_BUY) ?
@@ -376,7 +372,7 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index)
 
    if(result)
      {
-      g_lastEntryTime = now;
+      EntryCooldown("Grid",true,false);
       g_gridLevels = level_index;
       g_lastGridPrice = price;
       string direction = (type==ORDER_TYPE_BUY) ? "BUY" : "SELL";
@@ -427,9 +423,7 @@ void ManageBasketControls()
    if(g_currentClusterId==0)
       return;
 
-   double basket_profit = 0.0;
-
-   basket_profit = GetClusterProfit(g_currentClusterId);
+   double basket_profit = GetSymbolProfit();
 
    if(InpBasketProfitTarget>0.0 && basket_profit>=InpBasketProfitTarget)
      {
@@ -451,7 +445,6 @@ void ManageBasketControls()
       if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
         {
          ResetGridState();
-         g_lastEntryTime = 0;
         }
       return;
      }
@@ -566,8 +559,9 @@ void ResetGridState()
    g_currentClusterType = ORDER_TYPE_BUY;
    g_currentClusterId = 0;
    g_partialCloseTriggered = false;
-   g_nextClusterId = 1;
-   g_lastEntryTime = 0;
+   if(g_nextClusterId<=0)
+      g_nextClusterId = 1;
+   EntryCooldown("Reset",false,true);
    if(had_cluster)
       Print("Cluster reset — ready for next grid cycle");
   }
@@ -592,6 +586,30 @@ double GetClusterProfit(const ulong cluster_id)
 
       total += PositionGetDouble(POSITION_PROFIT);
      }
+   return(total);
+  }
+//+------------------------------------------------------------------+
+//| Get total profit for the symbol                                   |
+//+------------------------------------------------------------------+
+double GetSymbolProfit()
+  {
+   double total = 0.0;
+
+   for(int i=0;i<PositionsTotal();++i)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=(long)InpMagic)
+         continue;
+
+      total += PositionGetDouble(POSITION_PROFIT);
+     }
+
    return(total);
   }
 //+------------------------------------------------------------------+
@@ -968,19 +986,15 @@ void OpenBasicPosition(ENUM_ORDER_TYPE type)
    double sl = 0.0;
    double tp = 0.0;
 
-   datetime now = TimeCurrent();
-   if(g_lastEntryTime!=0 && (now-g_lastEntryTime)<=60)
-     {
-      PrintFormat("Basic entry skipped due to cooldown. Seconds since last entry: %d",(int)(now-g_lastEntryTime));
+   if(!EntryCooldown("Basic",false,false))
       return;
-     }
 
    bool result = (type==ORDER_TYPE_BUY) ?
       trade.Buy(InpBaseLot,_Symbol,price,sl,tp,comment) :
       trade.Sell(InpBaseLot,_Symbol,price,sl,tp,comment);
 
    if(result)
-      g_lastEntryTime = now;
+      EntryCooldown("Basic",true,false);
   }
 //+------------------------------------------------------------------+
 //| Average tick volume                                              |
@@ -1078,5 +1092,34 @@ int GetTradingDate()
    MqlDateTime tm;
    TimeCurrent(tm);
    return(tm.year*10000 + tm.mon*100 + tm.day);
+  }
+//+------------------------------------------------------------------+
+//| Entry cooldown controller                                        |
+//+------------------------------------------------------------------+
+bool EntryCooldown(const string context,bool stamp,bool reset)
+  {
+   static datetime last_entry_time = 0;
+
+   if(reset)
+     {
+      last_entry_time = 0;
+      return(true);
+     }
+
+   datetime now = TimeCurrent();
+
+   if(stamp)
+     {
+      last_entry_time = now;
+      return(true);
+     }
+
+   if(last_entry_time!=0 && (now-last_entry_time)<=60)
+     {
+      PrintFormat("%s entry skipped due to cooldown. Seconds since last entry: %d",context,(int)(now-last_entry_time));
+      return(false);
+     }
+
+   return(true);
   }
 //+------------------------------------------------------------------+
