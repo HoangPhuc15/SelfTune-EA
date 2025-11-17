@@ -268,24 +268,12 @@ void SyncClusterState()
       g_activeDirection = cluster_type;
       g_lastGridPrice = last_price;
       g_gridLevels = CountClusterOrders(max_cluster);
-      if(cluster_type==ORDER_TYPE_BUY)
-         g_grid.buy_levels = (int)MathMax((double)g_grid.buy_levels,(double)g_gridLevels);
-      else
-         g_grid.sell_levels = (int)MathMax((double)g_grid.sell_levels,(double)g_gridLevels);
       if(g_nextClusterId<=max_cluster)
          g_nextClusterId = max_cluster+1;
-      g_gridLevels = (cluster_type==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
      }
    else
      {
-      g_currentClusterId = 0;
-      g_gridLevels = 0;
-      g_lastGridPrice = 0.0;
-      g_currentClusterType = ORDER_TYPE_BUY;
-      g_partialCloseTriggered = false;
-      g_grid.buy_levels = 0;
-      g_grid.sell_levels = 0;
-      g_activeDirection = (ENUM_ORDER_TYPE)-1;
+      ResetGridState();
      }
   }
 //+------------------------------------------------------------------+
@@ -300,7 +288,7 @@ void MaintainGrid()
       return;
 
    if(g_activeDirection!=(ENUM_ORDER_TYPE)-1 && g_currentClusterType!=g_activeDirection)
-      g_currentClusterType = g_activeDirection;
+      return;
 
    int cluster_orders = CountClusterOrders(g_currentClusterId);
    if(cluster_orders<=0)
@@ -414,6 +402,9 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index,double 
    if(volume<=0.0)
       return(false);
 
+   if(g_activeDirection!=(ENUM_ORDER_TYPE)-1 && type!=g_activeDirection)
+      return(false);
+
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick))
       return(false);
@@ -451,8 +442,7 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index,double 
       string dir_log = (type==ORDER_TYPE_BUY) ? "BUY" : "SELL";
       int calc_level = CountClusterOrders(cluster_id);
       string step_str = DoubleToString(InpGridStepPoints,0);
-      string base_str = DoubleToString(InpBaseLot,volume_digits);
-      PrintFormat("[GRID] Level=%d (calc=%d) | Direction=%s | Lot=%.2f | Multiplier=%.2f | Step=%s",g_gridLevels,calc_level,dir_log,volume,InpLotMultiplier,step_str);
+      PrintFormat("[GRID] Level=%d (calc=%d) | Direction=%s | Lot=%.2f | Multiplier=%.2f | Step=%s",level_index,calc_level,dir_log,volume,InpLotMultiplier,step_str);
       Print("New grid level ",g_gridLevels," opened at price ",price_str,", virtual TP ",virtual_tp_str," points");
       double basket_profit = 0.0;
       for(int i=PositionsTotal()-1;i>=0;--i)
@@ -744,9 +734,7 @@ double GetNextGridLot(const ENUM_ORDER_TYPE type,const ulong cluster_id)
    double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    int volume_digits = GetVolumeDigits(_Symbol);
 
-   int level = 0;
-   if(cluster_id>0)
-      level = CountClusterOrders(cluster_id);
+   int level = (cluster_id>0) ? CountClusterOrders(cluster_id) : 0;
 
    double multiplier = (EnableGrid && InpLotMultiplier>1.0) ? InpLotMultiplier : 1.0;
    double lot = InpBaseLot*MathPow(multiplier,(double)level);
