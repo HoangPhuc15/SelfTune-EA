@@ -274,6 +274,7 @@ void SyncClusterState()
          g_grid.sell_levels = (int)MathMax((double)g_grid.sell_levels,(double)g_gridLevels);
       if(g_nextClusterId<=max_cluster)
          g_nextClusterId = max_cluster+1;
+      g_gridLevels = (cluster_type==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
      }
    else
      {
@@ -363,7 +364,7 @@ void MaintainGrid()
          g_grid.sell_levels++;
       lastGridOpen = now;
       UpdateLastEntryFromPositions(g_currentClusterId);
-      g_gridLevels = CountClusterOrders(g_currentClusterId);
+      g_gridLevels = (g_currentClusterType==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
      }
   }
 //+------------------------------------------------------------------+
@@ -401,7 +402,7 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
       g_activeDirection = type;
       g_partialCloseTriggered = false;
       UpdateLastEntryFromPositions(g_currentClusterId);
-      g_gridLevels = CountClusterOrders(g_currentClusterId);
+      g_gridLevels = (type==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
       return(true);
      }
    return(false);
@@ -493,7 +494,7 @@ void ManageBasketControls()
      {
       int closed_positions = 0;
       double closed_volume = 0.0;
-      int previous_levels = g_gridLevels;
+      int previous_levels = (g_currentClusterType==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
       double price_snapshot = g_lastGridPrice;
       bool closed_any = CloseAllClusterOrders(g_currentClusterId,closed_positions,closed_volume);
       if(closed_any)
@@ -535,8 +536,9 @@ void ManageBasketControls()
          PrintFormat("[BASKET] Partial close triggered (%.0f%%)",PartialClosePercent);
          PrintFormat("Partial TP triggered: %s (Grid Level: %d, Last Price: %s)",profit_str,g_gridLevels,DoubleToString(g_lastGridPrice,_Digits));
          PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s (Cluster %I64u)",g_gridLevels,DoubleToString(g_lastGridPrice,_Digits),profit_str,g_currentClusterId);
-         g_gridLevels = CountClusterOrders(g_currentClusterId);
-        }
+         g_gridLevels = (g_currentClusterType==ORDER_TYPE_BUY) ? g_grid.buy_levels : g_grid.sell_levels;
+         UpdateLastEntryFromPositions(g_currentClusterId);
+       }
      }
   }
 //+------------------------------------------------------------------+
@@ -740,16 +742,17 @@ double GetNextGridLot(const ENUM_ORDER_TYPE type,const int level_zero_based)
 
    int level = MathMax(0,level_zero_based);
    double multiplier = (EnableGrid && InpLotMultiplier>1.0) ? InpLotMultiplier : 1.0;
-   double lot = InpBaseLot;
-   if(level>0)
-      lot = InpBaseLot*MathPow(multiplier,(double)level);
+   double lot = InpBaseLot*MathPow(multiplier,(double)level);
 
    if(max_volume>0.0)
       lot = MathMin(lot,max_volume);
 
-   double normalized = NormalizeVolumeValue(lot,min_volume,step,volume_digits);
-   if(normalized<min_volume)
-      normalized = min_volume;
+   bool round_up = (multiplier>1.0);
+   double normalized = NormalizeVolumeValue(lot,min_volume,step,volume_digits,round_up);
+   double base_normalized = NormalizeVolumeValue(InpBaseLot,min_volume,step,volume_digits,true);
+
+   if(normalized<base_normalized)
+      normalized = base_normalized;
 
    if(max_volume>0.0)
       normalized = MathMin(normalized,max_volume);
@@ -906,21 +909,25 @@ bool ClosePartialOrders(const ulong cluster_id,double percent,double &closed_vol
 //+------------------------------------------------------------------+
 //| Normalize volume to symbol constraints                            |
 //+------------------------------------------------------------------+
-double NormalizeVolumeValue(double volume,double min_volume,double step,int digits)
+double NormalizeVolumeValue(double volume,double min_volume,double step,int digits,bool round_up=false)
   {
    if(volume<min_volume)
-      return(0.0);
+     {
+      if(!round_up)
+         return(0.0);
+      volume = min_volume;
+     }
 
    double normalized = volume;
    if(step>0.0)
      {
-      double steps = MathFloor(volume/step + 1e-8);
+      double steps = round_up ? MathCeil(volume/step - 1e-8) : MathFloor(volume/step + 1e-8);
       normalized = steps*step;
      }
    normalized = NormalizeDouble(normalized,digits);
 
    if(normalized<min_volume)
-      normalized = 0.0;
+      normalized = min_volume;
 
    return(normalized);
   }
@@ -1050,17 +1057,19 @@ bool CheckBuySignal()
   {
    double avg_volume = AverageVolume();
    double current_volume = (double)rates[0].tick_volume;
-   double relaxed_multiplier = MathMax(0.5,InpVolumeMultiplier-0.2);
+   double relaxed_multiplier = MathMax(0.3,InpVolumeMultiplier*0.5);
    bool volume_confirmed = (avg_volume<=0.0) || (current_volume >= avg_volume*relaxed_multiplier);
 
    bool ma_bias = (fast_ma_buffer[0]>=slow_ma_buffer[0]);
    bool ma_cross_up = (fast_ma_buffer[0]>slow_ma_buffer[0] && fast_ma_buffer[1]<=slow_ma_buffer[1]);
-   bool ma_confirm = (ma_bias || ma_cross_up);
+   double ma_tolerance = 0.1*_Point;
+   bool ma_close = (MathAbs(fast_ma_buffer[0]-slow_ma_buffer[0])<=ma_tolerance);
+   bool ma_confirm = (ma_bias || ma_cross_up || ma_close);
 
-   double rsi_threshold = MathMax(0.0,InpRSIBullishLevel-5.0);
+   double rsi_threshold = MathMax(0.0,InpRSIBullishLevel-10.0);
    bool rsi_confirm  = (rsi_buffer[0]>=rsi_threshold);
 
-   double mfi_threshold  = MathMax(0.0,InpMFIBullishLevel-5.0);
+   double mfi_threshold  = MathMax(0.0,InpMFIBullishLevel-10.0);
    bool mfi_confirm  = (mfi_buffer[0]>=mfi_threshold);
 
    return(ma_confirm && rsi_confirm && mfi_confirm && volume_confirmed);
@@ -1072,17 +1081,19 @@ bool CheckSellSignal()
   {
    double avg_volume = AverageVolume();
    double current_volume = (double)rates[0].tick_volume;
-   double relaxed_multiplier = MathMax(0.5,InpVolumeMultiplier-0.2);
+   double relaxed_multiplier = MathMax(0.3,InpVolumeMultiplier*0.5);
    bool volume_confirmed = (avg_volume<=0.0) || (current_volume >= avg_volume*relaxed_multiplier);
 
    bool ma_bias = (fast_ma_buffer[0]<=slow_ma_buffer[0]);
    bool ma_cross_down = (fast_ma_buffer[0]<slow_ma_buffer[0] && fast_ma_buffer[1]>=slow_ma_buffer[1]);
-   bool ma_confirm = (ma_bias || ma_cross_down);
+   double ma_tolerance = 0.1*_Point;
+   bool ma_close = (MathAbs(fast_ma_buffer[0]-slow_ma_buffer[0])<=ma_tolerance);
+   bool ma_confirm = (ma_bias || ma_cross_down || ma_close);
 
-   double rsi_threshold = MathMin(100.0,InpRSIBearishLevel+5.0);
+   double rsi_threshold = MathMin(100.0,InpRSIBearishLevel+10.0);
    bool rsi_confirm   = (rsi_buffer[0]<=rsi_threshold);
 
-   double mfi_threshold = MathMin(100.0,InpMFIBearishLevel+5.0);
+   double mfi_threshold = MathMin(100.0,InpMFIBearishLevel+10.0);
    bool mfi_confirm   = (mfi_buffer[0]<=mfi_threshold);
 
    return(ma_confirm && rsi_confirm && mfi_confirm && volume_confirmed);
