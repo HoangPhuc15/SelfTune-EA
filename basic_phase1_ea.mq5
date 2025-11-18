@@ -75,6 +75,8 @@ struct GridClusterCounters
 
 GridClusterCounters g_grid = {0,0};
 ENUM_ORDER_TYPE     g_activeDirection = (ENUM_ORDER_TYPE)-1;
+datetime            g_lastSignalTime = 0;
+ENUM_ORDER_TYPE     g_lastSignalDirection = (ENUM_ORDER_TYPE)-1;
 
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
@@ -265,8 +267,7 @@ void SyncClusterState()
      {
       g_currentClusterId = max_cluster;
       g_currentClusterType = cluster_type;
-      if(g_activeDirection==(ENUM_ORDER_TYPE)-1)
-         g_activeDirection = cluster_type;
+      g_activeDirection = cluster_type;
       g_lastGridPrice = last_price;
       g_gridLevels = CountClusterOrders(max_cluster);
       if(g_nextClusterId<=max_cluster)
@@ -363,6 +364,10 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
    if(g_activeDirection!=(ENUM_ORDER_TYPE)-1 && type!=g_activeDirection)
       return(false);
 
+   datetime signal_time = iTime(_Symbol,_Period,0);
+   if(signal_time==g_lastSignalTime && type==g_lastSignalDirection)
+      return(false);
+
    ulong new_cluster_id = g_nextClusterId;
    g_lastGridPrice = 0.0;
 
@@ -384,6 +389,8 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
       g_nextClusterId = new_cluster_id+1;
       g_currentClusterType = type;
       g_activeDirection = type;
+      g_lastSignalTime = signal_time;
+      g_lastSignalDirection = type;
       g_partialCloseTriggered = false;
       UpdateLastEntryFromPositions(g_currentClusterId);
       g_gridLevels = CountClusterOrders(g_currentClusterId);
@@ -624,6 +631,8 @@ void ResetGridState()
    g_grid.buy_levels = 0;
    g_grid.sell_levels = 0;
    g_activeDirection = (ENUM_ORDER_TYPE)-1;
+   g_lastSignalTime = 0;
+   g_lastSignalDirection = (ENUM_ORDER_TYPE)-1;
    if(g_nextClusterId<=0)
       g_nextClusterId = 1;
    EntryCooldown("Reset",false,true);
