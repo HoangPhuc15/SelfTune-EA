@@ -265,7 +265,8 @@ void SyncClusterState()
      {
       g_currentClusterId = max_cluster;
       g_currentClusterType = cluster_type;
-      g_activeDirection = cluster_type;
+      if(g_activeDirection==(ENUM_ORDER_TYPE)-1)
+         g_activeDirection = cluster_type;
       g_lastGridPrice = last_price;
       g_gridLevels = CountClusterOrders(max_cluster);
       if(g_nextClusterId<=max_cluster)
@@ -325,7 +326,7 @@ void MaintainGrid()
    if(next_level>InpMaxGridLevels)
       return;
 
-   double next_lot = GetNextGridLot(g_currentClusterType,g_currentClusterId);
+   double next_lot = GetNextGridLot(g_currentClusterType,g_currentClusterId,current_level);
    if(next_lot<=0.0)
       return;
 
@@ -368,9 +369,9 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
    g_grid.buy_levels = 0;
    g_grid.sell_levels = 0;
 
-   int current_level = CountClusterOrders(new_cluster_id);
+   int current_level = 0;
    int display_level = current_level+1;
-   double initial_lot = GetNextGridLot(type,new_cluster_id);
+   double initial_lot = GetNextGridLot(type,new_cluster_id,current_level);
    if(initial_lot<=0.0)
       return(false);
 
@@ -724,7 +725,7 @@ double GetClusterVolume(const ulong cluster_id)
 //+------------------------------------------------------------------+
 //| Determine the next lot to use for the grid                        |
 //+------------------------------------------------------------------+
-double GetNextGridLot(const ENUM_ORDER_TYPE type,const ulong cluster_id)
+double GetNextGridLot(const ENUM_ORDER_TYPE type,const ulong cluster_id,const int existing_orders=-1)
   {
    if(type!=ORDER_TYPE_BUY && type!=ORDER_TYPE_SELL)
       return(0.0);
@@ -734,7 +735,9 @@ double GetNextGridLot(const ENUM_ORDER_TYPE type,const ulong cluster_id)
    double step = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
    int volume_digits = GetVolumeDigits(_Symbol);
 
-   int level = (cluster_id>0) ? CountClusterOrders(cluster_id) : 0;
+   int level = existing_orders;
+   if(level<0)
+      level = (cluster_id>0) ? CountClusterOrders(cluster_id) : 0;
 
    double multiplier = (EnableGrid && InpLotMultiplier>1.0) ? InpLotMultiplier : 1.0;
    double lot = InpBaseLot*MathPow(multiplier,(double)level);
