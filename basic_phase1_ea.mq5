@@ -32,6 +32,8 @@ input double    InpLotMultiplier       = 1.35;      // Multiplier for each subse
 input double    InpGridStepPoints      = 200;       // Distance between grid orders (points)
 input int       InpMaxGridLevels       = 50;        // Maximum grid levels per cluster
 input double    InpMaxTotalLot         = 1.0;       // Maximum total lot size across all orders
+input bool      AllowOverlapRecovery   = true;      // Allow recovery overlap partial closes
+input int       OverlapAfterOrders     = 3;         // Minimum orders before triggering overlap recovery
 
 sinput string   sep2                   = "--- TAKEPROFIT SETTINGS ---";
 input double    InpVirtualTP           = 60;        // Base virtual TP in points
@@ -490,6 +492,8 @@ void ManageBasketControls()
    if(g_currentClusterId==0)
       return;
 
+   ManageOverlapRecovery();
+
    double basket_profit = GetClusterProfit(g_currentClusterId);
 
    if(InpBasketProfitTarget>0.0 && basket_profit>=InpBasketProfitTarget)
@@ -540,7 +544,59 @@ void ManageBasketControls()
          PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s (Cluster %I64u)",g_gridLevels,DoubleToString(g_lastGridPrice,_Digits),profit_str,g_currentClusterId);
          g_gridLevels = CountClusterOrders(g_currentClusterId);
          UpdateLastEntryFromPositions(g_currentClusterId);
-       }
+        }
+     }
+  }
+//+------------------------------------------------------------------+
+//| Recovery partial close using overlap ends                         |
+//+------------------------------------------------------------------+
+void ManageOverlapRecovery()
+  {
+   if(!AllowOverlapRecovery)
+      return;
+
+   if(g_currentClusterId==0)
+      return;
+
+   int order_count = CountClusterOrders(g_currentClusterId);
+   if(order_count<OverlapAfterOrders)
+      return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return;
+
+   double current_price = (g_currentClusterType==ORDER_TYPE_BUY) ? tick.bid : tick.ask;
+   double price_move_points = 0.0;
+   if(g_lastGridPrice>0.0)
+     {
+      price_move_points = (g_currentClusterType==ORDER_TYPE_BUY) ?
+         (current_price-g_lastGridPrice)/_Point :
+         (g_lastGridPrice-current_price)/_Point;
+     }
+
+   double virtual_tp_points = GetVirtualTP(order_count-1);
+   if(price_move_points+1e-8<virtual_tp_points)
+      return;
+
+   double cluster_profit = GetClusterProfit(g_currentClusterId);
+   if(cluster_profit<=0.0)
+      return;
+
+   double closed_volume = 0.0;
+   int    closed_positions = 0;
+   if(CloseClusterEdgeOrders(g_currentClusterId,closed_volume,closed_positions))
+     {
+      int volume_digits = GetVolumeDigits(_Symbol);
+      string volume_str = DoubleToString(closed_volume,volume_digits);
+      string profit_str = DoubleToString(cluster_profit,2);
+      string details = StringFormat("Recovery partial close: %d edge orders %s lots at profit %s",closed_positions,volume_str,profit_str);
+      LogEvent("RecoveryPartial",details);
+      PrintFormat("[BASKET] Recovery partial close triggered — closed %d edge orders",closed_positions);
+      g_gridLevels = CountClusterOrders(g_currentClusterId);
+      UpdateLastEntryFromPositions(g_currentClusterId);
+      if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
+         ResetGridState();
      }
   }
 //+------------------------------------------------------------------+
@@ -908,6 +964,70 @@ bool ClosePartialOrders(const ulong cluster_id,double percent,double &closed_vol
          closed_positions++;
          closed_volume += volume_to_close;
          remaining = MathMax(0.0,remaining-volume_to_close);
+        }
+     }
+
+   return(closed_any);
+  }
+//+------------------------------------------------------------------+
+//| Close the oldest and newest cluster orders                        |
+//+------------------------------------------------------------------+
+bool CloseClusterEdgeOrders(const ulong cluster_id,double &closed_volume,int &closed_positions)
+  {
+   closed_volume = 0.0;
+   closed_positions = 0;
+
+   if(cluster_id==0)
+      return(false);
+
+   ulong oldest_ticket = 0;
+   ulong newest_ticket = 0;
+   datetime oldest_time = 0;
+   datetime newest_time = 0;
+   bool initialized = false;
+
+   for(int i=0;i<PositionsTotal();++i)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(!IsClusterPosition(ticket,cluster_id))
+         continue;
+
+      datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
+      if(!initialized || open_time<oldest_time)
+        {
+         oldest_time = open_time;
+         oldest_ticket = ticket;
+        }
+      if(!initialized || open_time>newest_time)
+        {
+         newest_time = open_time;
+         newest_ticket = ticket;
+        }
+      initialized = true;
+     }
+
+   bool closed_any = false;
+   ulong tickets[2] = {oldest_ticket,newest_ticket};
+
+   for(int i=0;i<2;++i)
+     {
+      ulong ticket = tickets[i];
+      if(ticket==0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      if(trade.PositionClose(ticket))
+        {
+         closed_any = true;
+         closed_positions++;
+         closed_volume += volume;
         }
      }
 
