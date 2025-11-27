@@ -59,6 +59,7 @@ int             current_trading_date = -1;
 
 int             g_gridLevels = 0;
 double          g_lastGridPrice = 0.0;
+double          g_lastGridStepPoints = 0.0;
 ENUM_ORDER_TYPE g_currentClusterType = ORDER_TYPE_BUY;
 ulong           g_currentClusterId = 0;
 ulong           g_nextClusterId = 1;
@@ -114,6 +115,7 @@ int OnInit()
 
    g_gridLevels = 0;
    g_lastGridPrice = 0.0;
+   g_lastGridStepPoints = 0.0;
    g_currentClusterType = ORDER_TYPE_BUY;
    g_currentClusterId = 0;
    g_nextClusterId = 1;
@@ -269,6 +271,14 @@ void SyncClusterState()
       g_activeDirection = cluster_type;
       g_lastGridPrice = last_price;
       g_gridLevels = CountClusterOrders(max_cluster);
+      if(g_lastGridStepPoints<=0.0)
+        {
+         double step_multiplier = (EnableGrid && InpGridDistanceMultiplier>1.0) ? InpGridDistanceMultiplier : 1.0;
+         if(g_gridLevels>=2 && step_multiplier>0.0)
+            g_lastGridStepPoints = InpGridStepPoints*MathPow(step_multiplier,(double)(g_gridLevels-2));
+         else
+            g_lastGridStepPoints = InpGridStepPoints;
+        }
       if(g_nextClusterId<=max_cluster)
          g_nextClusterId = max_cluster+1;
      }
@@ -283,9 +293,17 @@ void SyncClusterState()
 double GetNextGridStepPoints(const int existing_orders)
   {
    double multiplier = (EnableGrid && InpGridDistanceMultiplier>1.0) ? InpGridDistanceMultiplier : 1.0;
-   int level_index = MathMax(existing_orders-1,0);
-   double step_points = InpGridStepPoints*MathPow(multiplier,(double)level_index);
-   return(step_points);
+   double base_step = InpGridStepPoints;
+
+   if(existing_orders<=1)
+      return(base_step);
+
+   if(multiplier<=0.0)
+      multiplier = 1.0;
+
+   double last_step = (g_lastGridStepPoints>0.0) ? g_lastGridStepPoints : base_step*MathPow(multiplier,(double)MathMax(existing_orders-2,0));
+   double next_step = last_step*multiplier;
+   return(next_step);
   }
 //+------------------------------------------------------------------+
 //| Maintain active grid                                              |
@@ -383,6 +401,7 @@ bool StartNewCluster(ENUM_ORDER_TYPE type)
 
    g_grid.buy_levels = 0;
    g_grid.sell_levels = 0;
+   g_lastGridStepPoints = InpGridStepPoints;
 
    int current_level = 0;
    int display_level = current_level+1;
@@ -451,6 +470,7 @@ bool OpenGridOrder(ENUM_ORDER_TYPE type,ulong cluster_id,int level_index,double 
          g_grid.buy_levels = g_gridLevels;
       else
          g_grid.sell_levels = g_gridLevels;
+      g_lastGridStepPoints = (step_points>0.0) ? step_points : InpGridStepPoints;
       g_lastGridPrice = price;
       string direction = (type==ORDER_TYPE_BUY) ? "BUY" : "SELL";
       int volume_digits = GetVolumeDigits(_Symbol);
@@ -660,6 +680,7 @@ void ResetGridState()
    g_lastGridPrice = 0.0;
    g_currentClusterType = ORDER_TYPE_BUY;
    g_currentClusterId = 0;
+   g_lastGridStepPoints = 0.0;
    g_overlapPartialTriggered = false;
    g_grid.buy_levels = 0;
    g_grid.sell_levels = 0;
