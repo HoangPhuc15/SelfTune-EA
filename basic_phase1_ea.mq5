@@ -494,75 +494,64 @@ void ManageBasketControls()
       return;
      }
 
-   double cluster_profit = GetClusterProfit(g_currentClusterId);
-   double cluster_volume = GetClusterVolume(g_currentClusterId);
-   double point_value_per_lot = GetPointValuePerLot();
-   if(point_value_per_lot<=0.0)
-      return;
-   if(cluster_volume<=0.0)
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
       return;
 
-   int grid_count = MathMax(order_count-1,0);
-   double full_target_points = MathMax(InpVirtualTP - InpTPReductionPerOrder*grid_count,0.0);
-   double full_target_currency = full_target_points*cluster_volume*point_value_per_lot;
-
-   if(AllowOverlapRecovery && !g_overlapPartialTriggered && order_count>=OverlapAfterOrders && cluster_profit>0.0)
+   double current_price = (g_currentClusterType==ORDER_TYPE_BUY) ? tick.bid : tick.ask;
+   double price_move_points = 0.0;
+   if(g_lastGridPrice>0.0)
      {
-      double edge_profit = 0.0;
-      double edge_volume = 0.0;
-      int edge_count = 0;
-      if(GetClusterEdgeSnapshot(g_currentClusterId,edge_profit,edge_volume,edge_count))
-        {
-         int edge_grid = MathMax(edge_count-1,0);
-         double edge_target_points = MathMax(InpVirtualTP - InpTPReductionPerOrder*edge_grid,0.0);
-         double edge_target_currency = edge_target_points*edge_volume*point_value_per_lot;
+      price_move_points = (g_currentClusterType==ORDER_TYPE_BUY) ?
+         (current_price-g_lastGridPrice)/_Point :
+         (g_lastGridPrice-current_price)/_Point;
+     }
 
-         if(edge_target_currency>0.0 && edge_profit+1e-8>=edge_target_currency)
+   double cluster_profit = GetClusterProfit(g_currentClusterId);
+   double virtual_tp_points = GetVirtualTP(order_count-1);
+
+   if(AllowOverlapRecovery && !g_overlapPartialTriggered && order_count>=OverlapAfterOrders &&
+      virtual_tp_points>0.0 && price_move_points+1e-8>=virtual_tp_points && cluster_profit>0.0)
+     {
+      double closed_volume = 0.0;
+      int closed_positions = 0;
+      if(CloseClusterEdgeOrders(g_currentClusterId,closed_volume,closed_positions))
+        {
+         g_overlapPartialTriggered = true;
+         int volume_digits = GetVolumeDigits(_Symbol);
+         string volume_str = DoubleToString(closed_volume,volume_digits);
+         string profit_str = DoubleToString(cluster_profit,2);
+         string details = StringFormat("Recovery partial close: %d edge orders %s lots at profit %s",closed_positions,volume_str,profit_str);
+         LogEvent("RecoveryPartial",details);
+         PrintFormat("[BASKET] Partial edge close triggered after %.0f pts move (target %.0f)",price_move_points,virtual_tp_points);
+         g_gridLevels = CountClusterOrders(g_currentClusterId);
+         UpdateLastEntryFromPositions(g_currentClusterId);
+         if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
            {
-            double closed_volume = 0.0;
-            int closed_positions = 0;
-            if(CloseClusterEdgeOrders(g_currentClusterId,closed_volume,closed_positions))
-              {
-               g_overlapPartialTriggered = true;
-               int volume_digits = GetVolumeDigits(_Symbol);
-               string volume_str = DoubleToString(closed_volume,volume_digits);
-               string profit_str = DoubleToString(edge_profit,2);
-               string target_str = DoubleToString(edge_target_currency,2);
-               string details = StringFormat("Recovery partial close: %d edge orders %s lots at profit %s (target %s)",closed_positions,volume_str,profit_str,target_str);
-               LogEvent("RecoveryPartial",details);
-               PrintFormat("[BASKET] Partial edge close triggered at profit %s (target %s)",profit_str,target_str);
-               g_gridLevels = CountClusterOrders(g_currentClusterId);
-               UpdateLastEntryFromPositions(g_currentClusterId);
-               if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
-                 {
-                  ResetGridState();
-                  return;
-                 }
-               order_count = CountClusterOrders(g_currentClusterId);
-               cluster_profit = GetClusterProfit(g_currentClusterId);
-               cluster_volume = GetClusterVolume(g_currentClusterId);
-               grid_count = MathMax(order_count-1,0);
-               full_target_points = MathMax(InpVirtualTP - InpTPReductionPerOrder*grid_count,0.0);
-               full_target_currency = full_target_points*cluster_volume*point_value_per_lot;
-              }
+            ResetGridState();
+            return;
            }
+         order_count = CountClusterOrders(g_currentClusterId);
+         cluster_profit = GetClusterProfit(g_currentClusterId);
+         virtual_tp_points = GetVirtualTP(MathMax(order_count-1,0));
         }
      }
 
-   if(order_count>0 && full_target_currency>0.0 && cluster_profit+1e-8>=full_target_currency)
+   if(order_count>0 && virtual_tp_points>0.0 && price_move_points+1e-8>=virtual_tp_points && cluster_profit>0.0)
      {
       int closed_positions = 0;
       double closed_volume = 0.0;
+      double price_snapshot = g_lastGridPrice;
       bool closed_any = CloseAllClusterOrders(g_currentClusterId,closed_positions,closed_volume);
       if(closed_any)
         {
          int volume_digits = GetVolumeDigits(_Symbol);
          string volume_str = DoubleToString(closed_volume,volume_digits);
          string profit_str = DoubleToString(cluster_profit,2);
-         string target_str = DoubleToString(full_target_currency,2);
-         string details = StringFormat("Virtual TP basket close: %d positions %s lots at profit %s (target %s)",closed_positions,volume_str,profit_str,target_str);
+         string details = StringFormat("Virtual TP basket close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
          LogEvent("BasketCloseVirtual",details);
          Print("[BASKET] Cluster fully closed – virtual TP target reached (profit ",profit_str,")");
+         PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s, Cluster Reset Triggered (Cluster %I64u)",order_count,DoubleToString(price_snapshot,_Digits),profit_str,g_currentClusterId);
         }
       if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
         {
@@ -757,76 +746,6 @@ double GetClusterVolume(const ulong cluster_id)
       total += PositionGetDouble(POSITION_VOLUME);
    }
    return(total);
-  }
-//+------------------------------------------------------------------+
-//| Get point value per lot in account currency                      |
-//+------------------------------------------------------------------+
-double GetPointValuePerLot()
-  {
-   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
-   double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   if(tick_size<=0.0)
-      return(0.0);
-   return(tick_value/tick_size);
-  }
-//+------------------------------------------------------------------+
-//| Snapshot edge (oldest/newest) profit and volume for a cluster    |
-//+------------------------------------------------------------------+
-bool GetClusterEdgeSnapshot(const ulong cluster_id,double &edge_profit,double &edge_volume,int &edge_count)
-  {
-   edge_profit = 0.0;
-   edge_volume = 0.0;
-   edge_count  = 0;
-
-   if(cluster_id==0)
-      return(false);
-
-   ulong oldest_ticket = 0;
-   ulong newest_ticket = 0;
-   datetime oldest_time = 0;
-   datetime newest_time = 0;
-   bool initialized = false;
-
-   for(int i=0;i<PositionsTotal();++i)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket==0)
-         continue;
-      if(!PositionSelectByTicket(ticket))
-         continue;
-      if(!IsClusterPosition(ticket,cluster_id))
-         continue;
-
-      datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
-      if(!initialized || open_time<oldest_time)
-        {
-         oldest_time = open_time;
-         oldest_ticket = ticket;
-        }
-      if(!initialized || open_time>newest_time)
-        {
-         newest_time = open_time;
-         newest_ticket = ticket;
-        }
-      initialized = true;
-     }
-
-   ulong tickets[2] = {oldest_ticket,newest_ticket};
-
-   for(int i=0;i<2;++i)
-     {
-      ulong ticket = tickets[i];
-      if(ticket==0)
-         continue;
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      edge_profit += PositionGetDouble(POSITION_PROFIT);
-      edge_volume += PositionGetDouble(POSITION_VOLUME);
-      edge_count++;
-     }
-
-   return(edge_count>0);
   }
 //+------------------------------------------------------------------+
 //| Determine the next lot to use for the grid                        |
