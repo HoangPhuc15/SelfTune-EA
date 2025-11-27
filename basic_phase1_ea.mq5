@@ -495,6 +495,49 @@ void ManageBasketControls()
    ManageOverlapRecovery();
 
    double basket_profit = GetClusterProfit(g_currentClusterId);
+   int    order_count   = CountClusterOrders(g_currentClusterId);
+
+   // Virtual TP driven full cluster exit (group close) when overlap recovery is enabled
+   // and price has advanced enough from the last entry while the basket is in profit.
+   if(AllowOverlapRecovery && order_count>=OverlapAfterOrders)
+     {
+      MqlTick tick;
+      if(SymbolInfoTick(_Symbol,tick))
+        {
+         double current_price = (g_currentClusterType==ORDER_TYPE_BUY) ? tick.bid : tick.ask;
+         double price_move_points = 0.0;
+         if(g_lastGridPrice>0.0)
+           {
+            price_move_points = (g_currentClusterType==ORDER_TYPE_BUY) ?
+               (current_price-g_lastGridPrice)/_Point :
+               (g_lastGridPrice-current_price)/_Point;
+           }
+
+         double virtual_tp_points = GetVirtualTP(order_count-1);
+         if(price_move_points+1e-8>=virtual_tp_points && basket_profit>0.0)
+           {
+            int closed_positions = 0;
+            double closed_volume = 0.0;
+            double price_snapshot = g_lastGridPrice;
+            bool closed_any = CloseAllClusterOrders(g_currentClusterId,closed_positions,closed_volume);
+            if(closed_any)
+              {
+               int volume_digits = GetVolumeDigits(_Symbol);
+               string volume_str = DoubleToString(closed_volume,volume_digits);
+               string profit_str = DoubleToString(basket_profit,2);
+               string details = StringFormat("Overlap basket close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
+               LogEvent("BasketCloseOverlap",details);
+               Print("[BASKET] Cluster fully closed by virtual TP overlap condition (profit ",profit_str,")");
+               PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s, Cluster Reset Triggered (Cluster %I64u)",order_count,DoubleToString(price_snapshot,_Digits),profit_str,g_currentClusterId);
+              }
+            if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
+              {
+               ResetGridState();
+              }
+            return;
+           }
+        }
+     }
 
    if(InpBasketProfitTarget>0.0 && basket_profit>=InpBasketProfitTarget)
      {
