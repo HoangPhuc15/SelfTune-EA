@@ -66,6 +66,7 @@ ENUM_ORDER_TYPE g_currentClusterType = ORDER_TYPE_BUY;
 ulong           g_currentClusterId = 0;
 ulong           g_nextClusterId = 1;
 bool            g_partialCloseTriggered = false;
+bool            g_overlapPartialTriggered = false;
 string          g_logFileName = "";
 bool            g_logHeaderWritten = false;
 
@@ -121,6 +122,7 @@ int OnInit()
    g_currentClusterId = 0;
    g_nextClusterId = 1;
    g_partialCloseTriggered = false;
+   g_overlapPartialTriggered = false;
    g_logFileName = StringFormat("SelfTuneEA_%s.csv",_Symbol);
    g_logHeaderWritten = false;
    g_grid.buy_levels = 0;
@@ -654,6 +656,9 @@ void ManageOverlapRecovery()
    if(!AllowOverlapRecovery)
       return;
 
+   if(g_overlapPartialTriggered)
+      return;
+
    if(g_currentClusterId==0)
       return;
 
@@ -665,25 +670,37 @@ void ManageOverlapRecovery()
    if(!SymbolInfoTick(_Symbol,tick))
       return;
 
-   double virtual_tp_points = GetVirtualTP(order_count-1);
-   double cluster_profit = GetClusterProfit(g_currentClusterId);
-   double cluster_volume = GetClusterVolume(g_currentClusterId);
-   double profit_trigger = ComputeVirtualProfitTarget(order_count,cluster_volume);
-   if(virtual_tp_points<=0.0 || profit_trigger<=0.0)
+   double last_price = g_lastGridPrice;
+   if(last_price<=0.0)
       return;
-   if(cluster_profit+1e-8<profit_trigger)
+
+   double current_price = (g_currentClusterType==ORDER_TYPE_BUY) ? tick.bid : tick.ask;
+   double move_points = (g_currentClusterType==ORDER_TYPE_BUY) ?
+      (current_price-last_price)/_Point :
+      (last_price-current_price)/_Point;
+
+   double virtual_tp_points = GetVirtualTP(order_count-1);
+   if(virtual_tp_points<=0.0)
+      return;
+
+   if(move_points+1e-8<virtual_tp_points)
+      return;
+
+   double cluster_profit = GetClusterProfit(g_currentClusterId);
+   if(cluster_profit<=0.0)
       return;
 
    double closed_volume = 0.0;
    int    closed_positions = 0;
    if(CloseClusterEdgeOrders(g_currentClusterId,closed_volume,closed_positions))
      {
+      g_overlapPartialTriggered = true;
       int volume_digits = GetVolumeDigits(_Symbol);
       string volume_str = DoubleToString(closed_volume,volume_digits);
       string profit_str = DoubleToString(cluster_profit,2);
       string details = StringFormat("Recovery partial close: %d edge orders %s lots at profit %s",closed_positions,volume_str,profit_str);
       LogEvent("RecoveryPartial",details);
-      PrintFormat("[BASKET] Recovery partial close triggered — closed %d edge orders",closed_positions);
+      PrintFormat("[BASKET] Recovery partial close triggered — closed %d edge orders at %.0f pts move (target %.0f)",closed_positions,move_points,virtual_tp_points);
       g_gridLevels = CountClusterOrders(g_currentClusterId);
       UpdateLastEntryFromPositions(g_currentClusterId);
       if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
@@ -775,6 +792,7 @@ void ResetGridState()
    g_currentClusterType = ORDER_TYPE_BUY;
    g_currentClusterId = 0;
    g_partialCloseTriggered = false;
+   g_overlapPartialTriggered = false;
    g_grid.buy_levels = 0;
    g_grid.sell_levels = 0;
    g_activeDirection = (ENUM_ORDER_TYPE)-1;
