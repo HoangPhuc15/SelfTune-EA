@@ -538,24 +538,22 @@ void ManageBasketControls()
       return;
      }
 
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick))
-      return;
+   double cluster_profit = GetClusterProfit(g_currentClusterId);
+   double cluster_volume = GetClusterVolume(g_currentClusterId);
+   int    grid_orders    = MathMax(order_count-1,0);
+   double basket_target  = ComputeVirtualTargetProfit(cluster_volume,grid_orders);
 
-   double current_price = (g_currentClusterType==ORDER_TYPE_BUY) ? tick.bid : tick.ask;
-   double price_move_points = 0.0;
-   if(g_lastGridPrice>0.0)
+   double edge_volume = 0.0;
+   int    edge_count  = 0;
+   double edge_target = 0.0;
+   if(GetEdgeVolumes(g_currentClusterId,edge_volume,edge_count))
      {
-      price_move_points = (g_currentClusterType==ORDER_TYPE_BUY) ?
-         (current_price-g_lastGridPrice)/_Point :
-         (g_lastGridPrice-current_price)/_Point;
+      int edge_grids = MathMax(edge_count-1,0);
+      edge_target = ComputeVirtualTargetProfit(edge_volume,edge_grids);
      }
 
-   double cluster_profit = GetClusterProfit(g_currentClusterId);
-   double virtual_tp_points = GetVirtualTP(order_count-1);
-
    if(AllowOverlapRecovery && !g_overlapPartialTriggered && order_count>=OverlapAfterOrders &&
-      virtual_tp_points>0.0 && price_move_points+1e-8>=virtual_tp_points && cluster_profit>0.0)
+      edge_target>0.0 && cluster_profit+1e-8>=edge_target)
      {
       double closed_volume = 0.0;
       int closed_positions = 0;
@@ -565,9 +563,9 @@ void ManageBasketControls()
          int volume_digits = GetVolumeDigits(_Symbol);
          string volume_str = DoubleToString(closed_volume,volume_digits);
          string profit_str = DoubleToString(cluster_profit,2);
-         string details = StringFormat("Recovery partial close: %d edge orders %s lots at profit %s",closed_positions,volume_str,profit_str);
+         string details = StringFormat("Recovery partial close: %d edge orders %s lots at profit %s (target %.2f)",closed_positions,volume_str,profit_str,edge_target);
          LogEvent("RecoveryPartial",details);
-         PrintFormat("[BASKET] Partial edge close triggered after %.0f pts move (target %.0f)",price_move_points,virtual_tp_points);
+         PrintFormat("[BASKET] Partial edge close triggered at profit %.2f / target %.2f",cluster_profit,edge_target);
          g_gridLevels = CountClusterOrders(g_currentClusterId);
          UpdateLastEntryFromPositions(g_currentClusterId);
          if(PositionTotalByMagicSymbol(InpMagic,_Symbol)==0)
@@ -577,11 +575,13 @@ void ManageBasketControls()
            }
          order_count = CountClusterOrders(g_currentClusterId);
          cluster_profit = GetClusterProfit(g_currentClusterId);
-         virtual_tp_points = GetVirtualTP(MathMax(order_count-1,0));
+         cluster_volume = GetClusterVolume(g_currentClusterId);
+         grid_orders = MathMax(order_count-1,0);
+         basket_target = ComputeVirtualTargetProfit(cluster_volume,grid_orders);
         }
      }
 
-   if(order_count>0 && virtual_tp_points>0.0 && price_move_points+1e-8>=virtual_tp_points && cluster_profit>0.0)
+   if(order_count>0 && basket_target>0.0 && cluster_profit+1e-8>=basket_target)
      {
       int closed_positions = 0;
       double closed_volume = 0.0;
@@ -592,7 +592,7 @@ void ManageBasketControls()
          int volume_digits = GetVolumeDigits(_Symbol);
          string volume_str = DoubleToString(closed_volume,volume_digits);
          string profit_str = DoubleToString(cluster_profit,2);
-         string details = StringFormat("Virtual TP basket close: %d positions %s lots at profit %s",closed_positions,volume_str,profit_str);
+         string details = StringFormat("Virtual TP basket close: %d positions %s lots at profit %s (target %.2f)",closed_positions,volume_str,profit_str,basket_target);
          LogEvent("BasketCloseVirtual",details);
          Print("[BASKET] Cluster fully closed – virtual TP target reached (profit ",profit_str,")");
          PrintFormat("Grid Level: %d, Price: %s, Basket Profit: %s, Cluster Reset Triggered (Cluster %I64u)",order_count,DoubleToString(price_snapshot,_Digits),profit_str,g_currentClusterId);
@@ -722,6 +722,97 @@ double GetClusterProfit(const ulong cluster_id)
       total += PositionGetDouble(POSITION_PROFIT);
      }
    return(total);
+  }
+//+------------------------------------------------------------------+
+//| Currency value per point per lot                                 |
+//+------------------------------------------------------------------+
+double PointValuePerLot()
+  {
+   double tick_value = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   double tick_size  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   if(tick_value<=0.0 || tick_size<=0.0)
+      return(0.0);
+   return(tick_value/tick_size);
+  }
+//+------------------------------------------------------------------+
+//| Compute virtual TP target in currency                            |
+//+------------------------------------------------------------------+
+double ComputeVirtualTargetProfit(const double volume,const int grid_orders)
+  {
+   double per_point = PointValuePerLot();
+   if(per_point<=0.0 || volume<=0.0)
+      return(0.0);
+
+   double tp_points = InpVirtualTP - InpTPReductionPerOrder*MathMax(grid_orders,0);
+   if(tp_points<0.0)
+      tp_points = 0.0;
+
+   return(tp_points*per_point*volume);
+  }
+//+------------------------------------------------------------------+
+//| Get edge volumes (oldest/newest) for partial close thresholds     |
+//+------------------------------------------------------------------+
+bool GetEdgeVolumes(const ulong cluster_id,double &edge_volume,int &edge_count)
+  {
+   edge_volume = 0.0;
+   edge_count  = 0;
+   if(cluster_id==0)
+      return(false);
+
+   ulong oldest_ticket = 0;
+   ulong newest_ticket = 0;
+   datetime oldest_time = 0;
+   datetime newest_time = 0;
+   bool initialized = false;
+
+   for(int i=0;i<PositionsTotal();++i)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(!IsClusterPosition(ticket,cluster_id))
+         continue;
+
+      datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
+      if(!initialized || open_time<oldest_time)
+        {
+         oldest_time = open_time;
+         oldest_ticket = ticket;
+        }
+      if(!initialized || open_time>newest_time)
+        {
+         newest_time = open_time;
+         newest_ticket = ticket;
+        }
+      initialized = true;
+     }
+
+   if(!initialized)
+      return(false);
+
+   double volume_sum = 0.0;
+   int count = 0;
+
+   ulong tickets[2] = {oldest_ticket,newest_ticket};
+   for(int i=0;i<2;++i)
+     {
+      ulong ticket = tickets[i];
+      if(ticket==0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      volume_sum += PositionGetDouble(POSITION_VOLUME);
+      count++;
+      if(tickets[0]!=tickets[1] && count==2)
+         continue;
+     }
+
+   edge_volume = volume_sum;
+   edge_count  = count;
+   return(count>0 && volume_sum>0.0);
   }
 //+------------------------------------------------------------------+
 //| Get total profit for the symbol                                   |
