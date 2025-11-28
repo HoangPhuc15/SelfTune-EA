@@ -743,11 +743,13 @@ double ComputeVirtualTargetProfit(const double volume,const int grid_orders)
    if(per_point<=0.0 || volume<=0.0)
       return(0.0);
 
-   double tp_points = InpVirtualTP - InpTPReductionPerOrder*MathMax(grid_orders,0);
-   if(tp_points<0.0)
-      tp_points = 0.0;
+   // Treat TP reduction as an absolute point discount per grid order (not scaled by volume)
+   // so partial/group closes follow the described examples even when lots differ.
+   double adjusted_points = InpVirtualTP*volume - InpTPReductionPerOrder*MathMax(grid_orders,0);
+   if(adjusted_points<0.0)
+      adjusted_points = 0.0;
 
-   return(tp_points*per_point*volume);
+   return(adjusted_points*per_point);
   }
 //+------------------------------------------------------------------+
 //| Get edge volumes (oldest/newest) for partial close thresholds     |
